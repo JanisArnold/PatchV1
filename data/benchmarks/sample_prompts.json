@@ -1,0 +1,14 @@
+[
+  {
+    "name": "small_talk_memory",
+    "prompt": "My name is Alex and I am building a desktop AI companion prototype. Reply naturally and mention one useful follow-up question."
+  },
+  {
+    "name": "planning_help",
+    "prompt": "Help me break a Raspberry Pi robot prototype into the first five software milestones."
+  },
+  {
+    "name": "technical_explanation",
+    "prompt": "Explain why storing every chat message directly in the prompt gets slower over time, using simple language."
+  }
+]

@@ -1,0 +1,11 @@
+from __future__ import annotations
+
+
+class TextInputAdapter:
+    def get_input(self) -> str:
+        return input("You> ").strip()
+
+
+class TextOutputAdapter:
+    def emit(self, text: str) -> None:
+        print(f"PATCH> {text}")

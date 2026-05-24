@@ -1,0 +1,77 @@
+{
+  "app": {
+    "name": "PATCH",
+    "data_dir": "data",
+    "benchmark_prompt_path": "data/benchmarks/sample_prompts.json",
+    "debug": false,
+    "default_profile": "default"
+  },
+  "memory": {
+    "recent_turn_limit": 6,
+    "max_fact_hits": 5,
+    "summary_turn_window": 6
+  },
+  "providers": {
+    "active": "ollama",
+    "ollama": {
+      "base_url": "http://127.0.0.1:11434",
+      "timeout_seconds": 120
+    },
+    "cloud": {
+      "enabled": false,
+      "mode": "heavy_load_only",
+      "provider": "",
+      "model": ""
+    }
+  },
+  "model_profiles": {
+    "default": {
+      "provider": "ollama",
+      "model": "gemma4:e2b",
+      "temperature": 0.4,
+      "top_p": 0.9,
+      "num_ctx": 4096,
+      "system_prompt": "You are PATCH, a warm, practical desktop AI companion."
+    },
+    "gemma4:e2b": {
+      "provider": "ollama",
+      "model": "gemma4:e2b",
+      "temperature": 0.4,
+      "top_p": 0.9,
+      "num_ctx": 4096,
+      "system_prompt": "You are PATCH, a warm, practical desktop AI companion."
+    },
+    "qwen3.5:2b": {
+      "provider": "ollama",
+      "model": "qwen3.5:2b",
+      "temperature": 0.4,
+      "top_p": 0.9,
+      "num_ctx": 4096,
+      "system_prompt": "You are PATCH, a warm, practical desktop AI companion."
+    },
+    "qwen3.5:4b": {
+      "provider": "ollama",
+      "model": "qwen3.5:4b",
+      "temperature": 0.35,
+      "top_p": 0.9,
+      "num_ctx": 4096,
+      "system_prompt": "You are PATCH, a warm, practical desktop AI companion."
+    },
+    "qwen3.5:9b": {
+      "provider": "ollama",
+      "model": "qwen3.5:9b",
+      "temperature": 0.3,
+      "top_p": 0.85,
+      "num_ctx": 8192,
+      "system_prompt": "You are PATCH, a careful desktop AI companion who answers thoughtfully."
+    },
+    "phi4-mini": {
+      "provider": "ollama",
+      "model": "phi4-mini",
+      "temperature": 0.25,
+      "top_p": 0.9,
+      "num_ctx": 8192,
+      "system_prompt": "You are PATCH, a careful desktop AI companion who explains things clearly and practically."
+    }
+  }
+}
