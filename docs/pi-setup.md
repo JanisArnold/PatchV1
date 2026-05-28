@@ -7,17 +7,24 @@ Use your PC for development, then deploy the same project onto the Raspberry Pi 
 ## Recommended Pi baseline for V1
 
 - Raspberry Pi 4 with 8 GB RAM
-- Raspberry Pi OS 64-bit
+- Raspberry Pi OS Lite 64-bit
 - SSH enabled
 - camera enabled later when hardware arrives
 - reliable power supply
 - Wi-Fi or Ethernet
 
+For the current PATCH phase, `Lite 64-bit` is the recommended choice because:
+
+- PATCH is still terminal-first
+- the Pi should stay as lean as possible
+- you do not need the desktop environment yet
+- the Pi 4 benefits from the 64-bit OS for heavier local compute tasks
+
 ## 1. Flash the OS
 
 Use Raspberry Pi Imager and choose:
 
-- `Raspberry Pi OS (64-bit)`
+- `Raspberry Pi OS Lite (64-bit)`
 
 Before writing the SD card, open the advanced options and set:
 
@@ -35,6 +42,8 @@ After the Pi starts, connect from your PC:
 ```powershell
 ssh <your-user>@patch-pi.local
 ```
+
+If `patch-pi.local` does not resolve on your PC, use the Pi's current IP address instead. This is commonly a local hostname resolution issue on the client machine or network, not a Pi problem.
 
 Then update the Pi:
 
@@ -82,15 +91,32 @@ Optional but useful later:
 sudo apt install -y libcamera-apps
 ```
 
-## 5. Create app directories
+## 5. Get PATCH onto the Pi
 
-Recommended layout on the Pi:
+The recommended workflow is to clone the repository directly on the Pi.
 
 ```bash
-mkdir -p ~/patch
-mkdir -p ~/patch/logs
-mkdir -p ~/patch/data
+git clone <your-repo-url> ~/patch
+cd ~/patch
 ```
+
+Why this is the preferred path:
+
+- easiest to keep the Pi updated
+- avoids copying local desktop artifacts
+- cleanest public-repo workflow
+- matches the contributor documentation
+
+After cloning:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp config/settings.example.json config/settings.json
+```
+
+The `~/patch` directory will be created by the clone step. Runtime files such as the SQLite database will be created automatically later when PATCH starts.
 
 ## 6. Install Ollama on the Pi
 
@@ -110,7 +136,28 @@ Pull a small model first:
 ollama pull gemma4:e2b
 ```
 
-## 7. Prepare for future hardware
+## 7. First PATCH startup on the Pi
+
+Start in terminal mode first:
+
+```bash
+cd ~/patch
+source .venv/bin/activate
+python3 -m patch.cli
+```
+
+Before adding any hardware features, confirm:
+
+1. PATCH starts successfully
+2. Ollama is reachable
+3. SQLite memory is created
+4. `/models` works
+5. `/facts` works
+6. `/benchmark` works
+
+Only after that should you move on to audio, camera, or display integration.
+
+## 8. Prepare for future hardware
 
 When your hardware arrives, add and test these one at a time:
 
@@ -121,6 +168,55 @@ When your hardware arrives, add and test these one at a time:
 
 Do not connect all peripherals and debug everything at once. Bring up one subsystem at a time.
 
+## 9. First audio hardware test
+
+Before integrating speech into PATCH, test the microphone and speaker directly with ALSA.
+
+List audio devices:
+
+```bash
+arecord -l
+aplay -l
+```
+
+For a USB microphone, the capture device may appear as something like:
+
+- `card 3, device 0`
+- `USB PnP Sound Device`
+
+Test live microphone levels:
+
+```bash
+arecord -D plughw:3,0 -vv -f cd -d 10 /dev/null
+```
+
+Test recording:
+
+```bash
+arecord -D plughw:3,0 -d 5 -f cd test-mic.wav
+```
+
+Then test playback:
+
+```bash
+aplay -D plughw:0,0 test-mic.wav
+```
+
+For small single-speaker output, mono-style playback is often clearer than stereo channel tests. If `speaker-test -c 2` sounds uneven between left and right, that is not necessarily a blocker for PATCH.
+
+Mic gain can be adjusted with:
+
+```bash
+alsamixer -c 3
+```
+
+Useful controls for many USB mics:
+
+- `Mic`
+- `Auto Gain Control`
+
+If close-range speech becomes understandable with `Mic` at a high level, the microphone is good enough for first PATCH integration.
+
 ## Practical advice
 
 - Develop on your PC.
@@ -128,3 +224,5 @@ Do not connect all peripherals and debug everything at once. Bring up one subsys
 - Start with text mode on the Pi too before adding voice or vision.
 - If SD card performance becomes annoying later, move models or app data to a USB SSD.
 - Use one local model first and optimize that path before adding cloud, camera loops, or always-on voice features.
+- Treat `git clone` on the Pi as the default deployment path unless you have a specific reason to copy files manually.
+- On Pi OS Lite, expect ALSA tools such as `arecord`, `aplay`, and `alsamixer` to be the first useful audio test tools before any higher-level audio stack is added.

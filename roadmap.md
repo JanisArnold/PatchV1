@@ -121,7 +121,7 @@ Prove that the current V0 brain runs on the Pi before adding any hardware adapte
 
 ### Tasks
 
-1. Move the code from PC to Pi using `scp` or Git.
+1. Clone the project on the Pi with Git.
 2. Create a fresh `.venv` on the Pi.
 3. Install requirements.
 4. Create `config/settings.json` from the example file.
@@ -154,12 +154,14 @@ Add natural interaction without overloading the Pi 4.
 - `push-to-talk`, not always-listening
 - offline-first speech stack
 - one full request-response pipeline at a time
+- validate raw microphone and speaker behavior with ALSA before integrating STT or TTS
 
 ### Likely stack
 
 - STT: `Vosk` first, `whisper.cpp` only if latency is acceptable
 - local model: `gemma4:e2b`
 - TTS: `Piper`
+- low-level device testing: `arecord`, `aplay`, `alsamixer`
 
 ### Pipeline
 
@@ -173,6 +175,8 @@ Add natural interaction without overloading the Pi 4.
 
 ### Acceptance checks
 
+- microphone is understandable at close range
+- mono speaker playback is clear enough for speech
 - speech is transcribed reliably enough for short commands
 - roundtrip latency feels acceptable
 - voice does not break memory behavior
