@@ -71,6 +71,28 @@ CREATE TABLE IF NOT EXISTS model_runs (
     notes TEXT,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS performance_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER,
+    phase TEXT NOT NULL,
+    latency_ms INTEGER NOT NULL,
+    metadata_json TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (session_id) REFERENCES sessions(id)
+);
+
+CREATE TABLE IF NOT EXISTS system_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER,
+    source TEXT NOT NULL,
+    temperature_c REAL,
+    throttled_hex TEXT,
+    arm_clock_hz INTEGER,
+    metadata_json TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (session_id) REFERENCES sessions(id)
+);
 """
 
 
@@ -272,6 +294,67 @@ class SQLiteMemoryStore:
             ),
         )
         self.connection.commit()
+
+    def record_performance_log(
+        self,
+        *,
+        session_id: Optional[int],
+        phase: str,
+        latency_ms: int,
+        metadata_json: Optional[str] = None,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO performance_logs(session_id, phase, latency_ms, metadata_json)
+            VALUES (?, ?, ?, ?)
+            """,
+            (session_id, phase, latency_ms, metadata_json),
+        )
+        self.connection.commit()
+
+    def record_system_snapshot(
+        self,
+        *,
+        session_id: Optional[int],
+        source: str,
+        temperature_c: Optional[float],
+        throttled_hex: Optional[str],
+        arm_clock_hz: Optional[int],
+        metadata_json: Optional[str] = None,
+    ) -> None:
+        self.connection.execute(
+            """
+            INSERT INTO system_snapshots(
+                session_id, source, temperature_c, throttled_hex, arm_clock_hz, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (session_id, source, temperature_c, throttled_hex, arm_clock_hz, metadata_json),
+        )
+        self.connection.commit()
+
+    def get_recent_performance_logs(self, limit: int = 20) -> List[Dict[str, object]]:
+        rows = self.connection.execute(
+            """
+            SELECT id, session_id, phase, latency_ms, metadata_json, created_at
+            FROM performance_logs
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_recent_system_snapshots(self, limit: int = 10) -> List[Dict[str, object]]:
+        rows = self.connection.execute(
+            """
+            SELECT id, session_id, source, temperature_c, throttled_hex, arm_clock_hz, metadata_json, created_at
+            FROM system_snapshots
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def count_turns_since_last_summary(self, session_id: int) -> int:
         row = self.connection.execute(

@@ -162,6 +162,7 @@ Add natural interaction without overloading the Pi 4.
 - local model: `gemma4:e2b`
 - TTS: `Piper`
 - low-level device testing: `arecord`, `aplay`, `alsamixer`
+- useful Pi packages/tools: `alsa-utils`, `ffmpeg`, `piper-tts`, `vosk`
 
 ### Pipeline
 
@@ -177,6 +178,7 @@ Add natural interaction without overloading the Pi 4.
 
 - microphone is understandable at close range
 - mono speaker playback is clear enough for speech
+- Piper can generate and play a clear local voice sample
 - speech is transcribed reliably enough for short commands
 - roundtrip latency feels acceptable
 - voice does not break memory behavior
@@ -226,6 +228,13 @@ Measure real bottlenecks and reduce latency, CPU load, and instability.
 - RAM usage
 - thermal/throttling state
 - real power usage if external measurement hardware is available
+
+The current codebase now includes a first internal performance log for:
+
+- turn timing
+- model timing
+- memory timing
+- Raspberry Pi system snapshots via `vcgencmd` when available
 
 ### System-level tools to use later
 

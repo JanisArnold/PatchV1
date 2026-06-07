@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from patch.adapters.text import TextInputAdapter, TextOutputAdapter
@@ -8,6 +9,7 @@ from patch.brain import Brain, render_debug_info
 from patch.config import AppConfig
 from patch.contracts import ModelProfile
 from patch.memory.store import SQLiteMemoryStore
+from patch.system_metrics import collect_system_snapshot, render_system_snapshot
 
 
 class Orchestrator:
@@ -47,6 +49,7 @@ class Orchestrator:
                     break
                 continue
 
+            turn_started = time.perf_counter()
             user_turn_id = self.memory_store.save_turn(self.session_id, "user", user_text)
             try:
                 reply, debug_info = self.brain.generate_reply(user_text, self.active_profile)
@@ -62,6 +65,23 @@ class Orchestrator:
                 assistant_text=reply,
                 active_profile=self.active_profile,
             )
+            turn_total_ms = int((time.perf_counter() - turn_started) * 1000)
+            self.memory_store.record_performance_log(
+                session_id=self.session_id,
+                phase="turn.total",
+                latency_ms=turn_total_ms,
+                metadata_json=json.dumps(
+                    {
+                        "profile": self.active_profile.name,
+                        "model": self.active_profile.model,
+                        "retrieval_ms": debug_info.get("retrieval_ms"),
+                        "prompt_build_ms": debug_info.get("prompt_build_ms"),
+                        "llm_ms": debug_info.get("latency_ms"),
+                        "total_ms": debug_info.get("total_ms"),
+                    }
+                ),
+            )
+            self._record_system_snapshot(source="turn")
             self.output_adapter.emit(reply)
             if self.debug_enabled:
                 self.output_adapter.emit(render_debug_info(debug_info))
@@ -94,6 +114,12 @@ class Orchestrator:
             summaries = self.memory_store.get_recent_summaries()
             self.output_adapter.emit(json.dumps(summaries, indent=2, ensure_ascii=True))
             return False
+        if command == "/perf":
+            self._show_performance()
+            return False
+        if command == "/system":
+            self._show_system()
+            return False
         if command == "/debug":
             self._toggle_debug(argument)
             return False
@@ -119,6 +145,27 @@ class Orchestrator:
             for model_name in provider.list_models():
                 lines.append(f"- {model_name}: {provider.estimate_capabilities(model_name)}")
         self.output_adapter.emit("\n".join(lines))
+
+    def _show_performance(self) -> None:
+        logs = self.memory_store.get_recent_performance_logs()
+        snapshots = self.memory_store.get_recent_system_snapshots(limit=5)
+        payload = {
+            "performance_logs": logs,
+            "system_snapshots": snapshots,
+        }
+        self.output_adapter.emit(json.dumps(payload, indent=2, ensure_ascii=True))
+
+    def _show_system(self) -> None:
+        snapshot = collect_system_snapshot()
+        self.memory_store.record_system_snapshot(
+            session_id=self.session_id,
+            source="manual",
+            temperature_c=snapshot.get("temperature_c"),
+            throttled_hex=snapshot.get("throttled_hex"),
+            arm_clock_hz=snapshot.get("arm_clock_hz"),
+            metadata_json=json.dumps(snapshot),
+        )
+        self.output_adapter.emit(render_system_snapshot(snapshot))
 
     def _switch_profile(self, argument: str) -> None:
         if not argument:
@@ -165,8 +212,20 @@ class Orchestrator:
             self.output_adapter.emit(
                 f"- {profile.name} ({profile.model}) completed {len(results)} prompt(s), avg latency {avg_latency} ms."
             )
+        self._record_system_snapshot(source="benchmark")
 
     def _default_profile(self) -> ModelProfile:
         if self.config.default_profile in self.config.model_profiles:
             return self.config.model_profiles[self.config.default_profile]
         return next(iter(self.config.model_profiles.values()))
+
+    def _record_system_snapshot(self, source: str) -> None:
+        snapshot = collect_system_snapshot()
+        self.memory_store.record_system_snapshot(
+            session_id=self.session_id,
+            source=source,
+            temperature_c=snapshot.get("temperature_c"),
+            throttled_hex=snapshot.get("throttled_hex"),
+            arm_clock_hz=snapshot.get("arm_clock_hz"),
+            metadata_json=json.dumps(snapshot),
+        )

@@ -74,6 +74,9 @@ class BrainTests(unittest.TestCase):
         reply, debug_info = brain.generate_reply("I like coffee", config.model_profiles["default"])
         self.assertEqual(reply, "Test reply")
         self.assertEqual(debug_info["profile"], "default")
+        self.assertIn("retrieval_ms", debug_info)
+        self.assertIn("prompt_build_ms", debug_info)
+        self.assertIn("total_ms", debug_info)
 
         brain.update_memory(
             session_id=session_id,
@@ -110,6 +113,35 @@ class BrainTests(unittest.TestCase):
         ).fetchall()
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["prompt_name"], "smoke")
+        store.close()
+
+    def test_memory_update_records_performance_logs(self) -> None:
+        tmp_path = Path(f"{self._testMethodName}_data")
+        tmp_path.mkdir(exist_ok=True)
+        config = build_config(tmp_path)
+        store = SQLiteMemoryStore(tmp_path / "patch.db")
+        brain = Brain(
+            config=config,
+            memory_store=store,
+            provider_registry={"ollama": FakeProvider()},
+            persona="You are PATCH.",
+        )
+        session_id = store.create_session()
+        user_turn_id = store.save_turn(session_id, "user", "I like tea")
+        store.save_turn(session_id, "assistant", "Noted.")
+
+        brain.update_memory(
+            session_id=session_id,
+            user_turn_id=user_turn_id,
+            user_text="I like tea",
+            assistant_text="Noted.",
+            active_profile=config.model_profiles["default"],
+        )
+
+        rows = store.get_recent_performance_logs()
+        phases = {row["phase"] for row in rows}
+        self.assertIn("memory.fact_extraction", phases)
+        self.assertIn("memory.summary", phases)
         store.close()
 
 

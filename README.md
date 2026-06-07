@@ -11,6 +11,7 @@ PATCH V0 can:
 - switch between Ollama-backed local models
 - benchmark multiple local models against the same prompt set
 - keep one startup default profile for production-style use while testing model-named profiles
+- record per-turn performance timings and Raspberry Pi system snapshots when available
 
 ## Repo status
 

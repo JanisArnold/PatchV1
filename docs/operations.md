@@ -35,6 +35,36 @@ Toggle inside the app:
 
 Debug mode prints the memory bundle used for a reply and extra provider information.
 
+## Performance logging
+
+PATCH now stores performance information in the local SQLite database.
+
+Current logged categories include:
+
+- total turn time
+- model generation latency
+- retrieval and prompt-building timing
+- memory fact extraction timing
+- memory summary timing
+- Raspberry Pi system snapshots when available
+
+Use these commands inside PATCH:
+
+```text
+/perf
+/system
+```
+
+On Raspberry Pi, a manual shell-level check is also useful:
+
+```bash
+vcgencmd measure_temp
+vcgencmd get_throttled
+vcgencmd measure_clock arm
+```
+
+These are especially useful when testing fan effectiveness, thermal throttling, and model-related slowdowns.
+
 ## Common issues
 
 ### Ollama not reachable

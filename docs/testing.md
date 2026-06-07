@@ -10,6 +10,7 @@ It covers:
 - when to reset the database
 - how to compare models fairly
 - what `/benchmark` actually does
+- how to inspect performance logs and Pi system health
 - what each command does
 - a recommended full testing workflow
 
@@ -358,6 +359,32 @@ Use when:
 
 - you want a cleaner chat experience
 
+### `/perf`
+
+Prints recent performance log rows and recent system snapshots from the local database.
+
+Use when:
+
+- you want to see what PATCH is spending time on
+- you want to compare model latency with total turn latency
+- you want to inspect recent Pi temperature/throttling snapshots captured during interactions
+
+### `/system`
+
+Collects and prints a fresh system snapshot.
+
+On Raspberry Pi, this includes `vcgencmd`-based information when available, such as:
+
+- temperature
+- throttling flags
+- ARM clock
+
+Use when:
+
+- you want a manual health snapshot right now
+- you are checking whether the Pi fan is helping
+- you want to compare temperature before and after a run
+
 ### `/benchmark`
 
 Runs the benchmark prompt set across all configured profiles and stores results in `model_runs`.
@@ -388,8 +415,10 @@ For one clean model test:
 7. run `/facts`
 8. run `/summary`
 9. run `/memory`
-10. write down your scores
-11. run `/exit`
+10. optionally run `/perf`
+11. optionally run `/system`
+12. write down your scores
+13. run `/exit`
 
 Repeat that entire sequence for the next model.
 

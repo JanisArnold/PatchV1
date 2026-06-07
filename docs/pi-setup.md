@@ -88,7 +88,7 @@ sudo apt install -y python3 python3-venv python3-pip git sqlite3 curl
 Optional but useful later:
 
 ```bash
-sudo apt install -y libcamera-apps
+sudo apt install -y libcamera-apps alsa-utils ffmpeg
 ```
 
 ## 5. Get PATCH onto the Pi
@@ -216,6 +216,81 @@ Useful controls for many USB mics:
 - `Auto Gain Control`
 
 If close-range speech becomes understandable with `Mic` at a high level, the microphone is good enough for first PATCH integration.
+
+## 10. First voice software test
+
+After raw audio devices work, test text-to-speech outside PATCH first.
+
+Inside the PATCH virtual environment:
+
+```bash
+cd ~/patch
+source .venv/bin/activate
+python3 -m pip install --upgrade pip
+python3 -m pip install piper-tts vosk
+```
+
+Create a local voice folder:
+
+```bash
+mkdir -p ~/patch/voices
+```
+
+Download a first Piper voice:
+
+```bash
+python3 -m piper.download_voices --data-dir ~/patch/voices en_US-lessac-medium
+```
+
+Generate a WAV file:
+
+```bash
+python3 -m piper --data-dir ~/patch/voices -m en_US-lessac-medium -f test-tts.wav -- "Hello, I am Patch. This is my first voice test on the Raspberry Pi."
+```
+
+Play it back through the working output:
+
+```bash
+aplay -D plughw:0,0 test-tts.wav
+```
+
+This validates the Pi TTS path before integrating it into PATCH.
+
+For speech-to-text, the recommended first path is `Vosk` because it is lighter than Whisper-based options on a Pi 4.
+
+Recommended next STT step after TTS succeeds:
+
+- record one mic sample with `arecord`
+- run a minimal Vosk transcription test
+- only then integrate STT into PATCH
+
+## 11. Performance and temperature checks
+
+When testing on the Pi, use both PATCH-level and shell-level checks.
+
+Inside PATCH:
+
+```text
+/perf
+/system
+```
+
+In the shell:
+
+```bash
+vcgencmd measure_temp
+vcgencmd get_throttled
+vcgencmd measure_clock arm
+```
+
+What to watch:
+
+- temperature while idle
+- temperature during model replies
+- whether throttling flags appear
+- whether total PATCH turn time is much larger than pure model time
+
+If a fan meaningfully lowers temperature and throttling disappears, that should also show up in your repeated `/system` snapshots and faster interaction timings.
 
 ## Practical advice
 

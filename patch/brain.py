@@ -95,21 +95,30 @@ class Brain:
         self.summary_service = SummaryService()
 
     def generate_reply(self, user_text: str, profile: ModelProfile) -> tuple:
+        started_total = time.perf_counter()
+        retrieval_started = time.perf_counter()
         bundle = self.memory_store.build_memory_bundle(
             query=user_text,
             recent_turn_limit=self.config.recent_turn_limit,
             max_fact_hits=self.config.max_fact_hits,
         )
+        retrieval_ms = int((time.perf_counter() - retrieval_started) * 1000)
+        prompt_started = time.perf_counter()
         messages = self._build_messages(user_text, profile, bundle)
+        prompt_build_ms = int((time.perf_counter() - prompt_started) * 1000)
         provider = self.provider_registry[profile.provider]
         started = time.perf_counter()
         response: ProviderResponse = provider.generate_reply(messages, profile)
         latency_ms = int((time.perf_counter() - started) * 1000)
+        total_ms = int((time.perf_counter() - started_total) * 1000)
         debug_info: Dict[str, object] = {
             "memory_bundle": self.memory_store.export_bundle_dict(bundle),
             "prompt_tokens_estimate": response.prompt_tokens_estimate,
             "response_tokens_estimate": response.response_tokens_estimate,
             "latency_ms": latency_ms,
+            "retrieval_ms": retrieval_ms,
+            "prompt_build_ms": prompt_build_ms,
+            "total_ms": total_ms,
             "profile": profile.name,
             "model": profile.model,
         }
@@ -124,13 +133,22 @@ class Brain:
         assistant_text: str,
         active_profile: ModelProfile,
     ) -> None:
+        fact_started = time.perf_counter()
         for fact in self.fact_extractor.extract(user_text, assistant_text):
             self.memory_store.upsert_fact(fact, source_turn_id=user_turn_id)
+        fact_extraction_ms = int((time.perf_counter() - fact_started) * 1000)
+        self.memory_store.record_performance_log(
+            session_id=session_id,
+            phase="memory.fact_extraction",
+            latency_ms=fact_extraction_ms,
+            metadata_json=json.dumps({"profile": active_profile.name}),
+        )
 
         total_turns = self.memory_store.get_turn_count(session_id)
         if total_turns % self.config.summary_turn_window != 0:
             return
 
+        summary_started = time.perf_counter()
         turns = self.memory_store.get_recent_turns(limit=self.config.summary_turn_window)
         previous_summary = self.memory_store.get_latest_summary()
         summary_profile = self.config.model_profiles.get("memory_extraction", active_profile)
@@ -145,6 +163,19 @@ class Brain:
             session_id=session_id,
             summary_text=summary_text,
             turn_count=total_turns,
+        )
+        summary_ms = int((time.perf_counter() - summary_started) * 1000)
+        self.memory_store.record_performance_log(
+            session_id=session_id,
+            phase="memory.summary",
+            latency_ms=summary_ms,
+            metadata_json=json.dumps(
+                {
+                    "profile": active_profile.name,
+                    "summary_profile": summary_profile.name,
+                    "turn_count": total_turns,
+                }
+            ),
         )
 
     def _build_messages(self, user_text: str, profile: ModelProfile, bundle) -> List[ChatMessage]:
