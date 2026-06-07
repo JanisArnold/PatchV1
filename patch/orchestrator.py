@@ -96,11 +96,20 @@ class Orchestrator:
         if command == "/exit":
             self.output_adapter.emit("Goodbye.")
             return True
+        if command == "/help":
+            self._show_help()
+            return False
         if command == "/models":
             self._show_models()
             return False
         if command == "/use":
             self._switch_profile(argument)
+            return False
+        if command == "/reasoning":
+            self._toggle_reasoning(argument)
+            return False
+        if command == "/think":
+            self._toggle_reasoning(argument)
             return False
         if command == "/memory":
             rows = self.memory_store.get_recent_memory_rows()
@@ -134,7 +143,11 @@ class Orchestrator:
         lines = ["Configured profiles:"]
         for name, profile in self.config.model_profiles.items():
             active_marker = " (active)" if name == self.active_profile.name else ""
-            lines.append(f"- {name}: {profile.model}{active_marker}")
+            think_value = profile.options.get("think")
+            think_suffix = ""
+            if think_value is not None:
+                think_suffix = f", think={'on' if bool(think_value) else 'off'}"
+            lines.append(f"- {name}: {profile.model}{think_suffix}{active_marker}")
 
         provider = self.brain.provider_registry[self.config.active_provider]
         ok, message = provider.healthcheck()
@@ -144,6 +157,25 @@ class Orchestrator:
             lines.append("Available Ollama models:")
             for model_name in provider.list_models():
                 lines.append(f"- {model_name}: {provider.estimate_capabilities(model_name)}")
+        self.output_adapter.emit("\n".join(lines))
+
+    def _show_help(self) -> None:
+        lines = [
+            "Available commands:",
+            "/help - Show this command list.",
+            "/models - List configured profiles and available Ollama models.",
+            "/use <profile-or-model> - Switch the active model/profile.",
+            "/reasoning on|off - Toggle Ollama thinking for the active profile.",
+            "/think on|off - Alias for /reasoning on|off.",
+            "/memory - Show recent stored conversation rows.",
+            "/facts - Show extracted durable facts.",
+            "/summary - Show recent rolling summaries.",
+            "/perf - Show recent performance logs and system snapshots.",
+            "/system - Capture and print a fresh system snapshot.",
+            "/debug on|off - Enable or disable debug output.",
+            "/benchmark - Run benchmark prompts across configured profiles.",
+            "/exit - Exit PATCH cleanly.",
+        ]
         self.output_adapter.emit("\n".join(lines))
 
     def _show_performance(self) -> None:
@@ -197,6 +229,22 @@ class Orchestrator:
             self.output_adapter.emit("Usage: /debug on|off")
             return
         self.output_adapter.emit(f"Debug mode {'enabled' if self.debug_enabled else 'disabled'}.")
+
+    def _toggle_reasoning(self, argument: str) -> None:
+        value = argument.lower()
+        if value in {"off", "false", "0", "nothink"}:
+            self.active_profile.options["think"] = False
+            self.output_adapter.emit(
+                f"Reasoning disabled for {self.active_profile.name} ({self.active_profile.model})."
+            )
+            return
+        if value in {"on", "true", "1", "think"}:
+            self.active_profile.options["think"] = True
+            self.output_adapter.emit(
+                f"Reasoning enabled for {self.active_profile.name} ({self.active_profile.model})."
+            )
+            return
+        self.output_adapter.emit("Usage: /reasoning on|off")
 
     def _run_benchmark(self) -> None:
         prompt_path = Path(self.config.benchmark_prompt_path)

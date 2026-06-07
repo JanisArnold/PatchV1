@@ -282,6 +282,15 @@ Use when:
 - checking whether your pulled models are visible
 - confirming the active runtime state
 
+### `/help`
+
+Prints the built-in command list directly in PATCH.
+
+Use when:
+
+- you want a quick reminder of available commands
+- you are testing on the Pi and do not want to switch back to the docs
+
 ### `/use <profile-or-model>`
 
 Switches PATCH to another configured profile.
@@ -358,6 +367,23 @@ Disables debug output.
 Use when:
 
 - you want a cleaner chat experience
+
+### `/reasoning on|off`
+
+Toggles Ollama thinking/reasoning mode for the currently active profile when the model supports it.
+
+Alias:
+
+```text
+/think on
+/think off
+```
+
+Use when:
+
+- a thinking-capable model is too slow on the Pi
+- you want fast conversational replies
+- you want to compare quality versus latency with the same model
 
 ### `/perf`
 

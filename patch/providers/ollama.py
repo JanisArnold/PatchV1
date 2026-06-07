@@ -35,17 +35,20 @@ class OllamaChatProvider:
         return "Capability estimate unknown; test with /benchmark."
 
     def generate_reply(self, messages: List[ChatMessage], model_profile: ModelProfile) -> ProviderResponse:
+        request_options = {
+            "temperature": model_profile.temperature,
+            "top_p": model_profile.top_p,
+            "num_ctx": model_profile.num_ctx,
+            **model_profile.options,
+        }
         body = {
             "model": model_profile.model,
             "stream": False,
             "messages": [{"role": m.role, "content": m.content} for m in messages],
-            "options": {
-                "temperature": model_profile.temperature,
-                "top_p": model_profile.top_p,
-                "num_ctx": model_profile.num_ctx,
-                **model_profile.options,
-            },
+            "options": request_options,
         }
+        if "think" in request_options:
+            body["think"] = bool(request_options["think"])
         payload = self._request_json("POST", "/api/chat", body)
         message = payload.get("message", {})
         text = str(message.get("content", "")).strip()
