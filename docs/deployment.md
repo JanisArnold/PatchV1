@@ -88,7 +88,7 @@ If you want PATCH to keep its memory when moving from PC to Pi, copy the databas
 Before voice, display, or camera work, verify this exact flow on the Pi:
 
 1. PATCH starts in terminal mode
-2. PATCH can talk to Ollama
+2. PATCH can talk to your running `llama-server`
 3. PATCH can save memory in SQLite
 4. `/models` works
 5. `/facts` works

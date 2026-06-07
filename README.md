@@ -1,76 +1,65 @@
 # PATCH V0 Brain Platform
 
-PATCH V0 is a text-only prototype of the PATCH desktop companion brain. It is designed to validate the permanent core of the system before any Raspberry Pi hardware is connected.
+PATCH V0 is the Pi-first brain runtime for PATCH, a desktop AI companion. It currently supports:
 
-PATCH V0 can:
-
-- chat in the terminal
-- store memory in SQLite
-- summarize older conversations so context does not grow forever
-- extract durable user facts
-- switch between Ollama-backed local models
-- benchmark multiple local models against the same prompt set
-- keep one startup default profile for production-style use while testing model-named profiles
-- record per-turn performance timings and Raspberry Pi system snapshots when available
+- terminal chat
+- SQLite memory with summaries and durable facts
+- `llama.cpp` via external `llama-server`
+- runtime modes tuned for Pi latency
+- background memory maintenance
+- per-stage performance logging
+- a standalone Pi voice-loop harness using Vosk + Piper
 
 ## Repo status
 
-- `V0` is text-only and runs in the terminal.
-- `V1` is planned as a Raspberry Pi companion build with voice, camera, and display adapters.
-- The current local runtime is `Ollama` first.
-- Cloud fallback is planned but disabled by default and intended only for heavier tasks later.
+- `V0` is still CLI-first, but the runtime is now structured for Pi audio, future eye-display states, and later camera support.
+- `llama.cpp` is the default local runtime target.
+- Cloud fallback is still planned, but disabled by default.
+- Screen and camera support are planned into the architecture, but kept out of the hot path for now.
 
 ## Quick start
 
 1. Install Python 3.9 or newer.
-2. Install Ollama and pull at least one model.
+2. Start an external `llama-server` with your chosen GGUF model.
 3. Create a virtual environment and install dependencies.
 4. Copy the example config.
 5. Start PATCH.
 
 ```powershell
 python -m venv .venv
-.venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 Copy-Item config\settings.example.json config\settings.json
 python -m patch.cli
 ```
 
-For full setup instructions, see [docs/setup.md](docs/setup.md).
+For the full local and Pi flow, see [docs/setup.md](docs/setup.md) and [docs/pi-setup.md](docs/pi-setup.md).
 
 ## Public repo safety
 
-Local runtime state is intentionally not meant to be committed.
+Commit only tracked examples and source files.
 
-Use:
-
-- `config/settings.example.json`
-- `config/persona.example.md`
-
-Do not commit:
+Keep local-only:
 
 - `.venv/`
 - `config/settings.json`
 - `data/patch.db`
-- local logs or caches
-
-## Current scope
-
-V0 intentionally uses text input and text output only. The goal is to prove the memory, orchestration, provider abstraction, and model-testing infrastructure that V1 will reuse on the Raspberry Pi.
+- `knowledgebase.md`
+- local logs, temp WAV files, and model artifacts
 
 ## Documentation
 
 - [Setup](docs/setup.md) - local PC setup and first run
-- [Testing Guide](docs/testing.md) - commands, clean model comparisons, and benchmark behavior
-- [Pi Setup](docs/pi-setup.md) - Raspberry Pi provisioning and base packages
-- [Deployment](docs/deployment.md) - moving PATCH from PC to Pi and optional `systemd`
-- [Architecture](docs/architecture.md) - module responsibilities and data flow
-- [Configuration](docs/configuration.md) - config schema and profile strategy
+- [Testing Guide](docs/testing.md) - commands, runtime modes, benchmarks, and Pi measurements
+- [Pi Setup](docs/pi-setup.md) - Raspberry Pi provisioning, `llama.cpp`, ALSA, Vosk, and Piper
+- [Deployment](docs/deployment.md) - moving PATCH from PC to Pi
+- [Architecture](docs/architecture.md) - hot path, background work, and adapter boundaries
+- [Configuration](docs/configuration.md) - config schema, profiles, and runtime modes
 - [Memory](docs/memory.md) - SQLite schema and retrieval design
-- [Operations](docs/operations.md) - runtime files and common issues
-- [V1 Roadmap](docs/v1-roadmap.md) - future voice, camera, and display path
-- [Roadmap](roadmap.md) - consolidated next steps from PC testing to Pi deployment and optimization
+- [Operations](docs/operations.md) - runtime files and diagnostics
+- [V1 Roadmap](docs/v1-roadmap.md) - summary pointer to the main roadmap
+- [Roadmap](roadmap.md) - staged plan from CLI to voice, display, camera, and Pi optimization
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for contributor setup, test, and local-file guidance.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contributor setup and local-file guidance.

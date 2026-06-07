@@ -2,19 +2,22 @@
 
 ## Runtime files
 
-Default folders:
-
-- `data/`
-- `data/benchmarks/`
-- `logs/`
-
-These runtime files are local-only and should not be committed to a public repo.
-
-## Inspect the database
-
-Use any SQLite browser or the `sqlite3` CLI to inspect:
+Default local runtime files include:
 
 - `data/patch.db`
+- `data/voice_loop_input.wav`
+- `data/voice_loop_reply.wav`
+- `data/benchmarks/`
+
+These are local-only and should not be committed.
+
+## Database inspection
+
+Inspect:
+
+- `data/patch.db`
+
+with any SQLite browser or the `sqlite3` CLI.
 
 ## Reset development state
 
@@ -22,64 +25,75 @@ Delete or move:
 
 - `data/patch.db`
 
-PATCH will recreate the schema on the next launch.
+PATCH will recreate the schema on next launch.
 
 ## Debug mode
 
-Toggle inside the app:
+Inside PATCH:
 
 ```text
 /debug on
 /debug off
 ```
 
-Debug mode prints the memory bundle used for a reply and extra provider information.
+Debug mode prints the memory bundle, turn plan, timings, and state transitions.
 
 ## Performance logging
 
-PATCH now stores performance information in the local SQLite database.
+PATCH stores per-stage performance information in SQLite.
 
-Current logged categories include:
+Common logged phases now include:
 
-- total turn time
-- model generation latency
-- retrieval and prompt-building timing
-- memory fact extraction timing
-- memory summary timing
-- Raspberry Pi system snapshots when available
+- `input.capture`
+- `turn.classification`
+- `memory.retrieval`
+- `prompt.assembly`
+- `llm.generate`
+- `turn.total`
+- `background.enqueue`
+- `background.memory.fact_extraction`
+- `background.memory.summary`
+- `display.state_update`
+- Pi voice-loop phases when used
 
-Use these commands inside PATCH:
+Use:
 
 ```text
 /perf
 /system
 ```
 
-On Raspberry Pi, a manual shell-level check is also useful:
-
-```bash
-vcgencmd measure_temp
-vcgencmd get_throttled
-vcgencmd measure_clock arm
-```
-
-These are especially useful when testing fan effectiveness, thermal throttling, and model-related slowdowns.
-
 ## Common issues
 
-### Ollama not reachable
+### `llama.cpp` not reachable
 
 Symptoms:
 
-- `/models` shows a provider error
-- chat replies fail before generation starts
+- `/models` shows provider errors
+- chat fails before generation starts
 
 Fix:
 
-1. Start the Ollama daemon.
-2. Verify `ollama list`.
-3. Confirm `providers.ollama.base_url` in config.
+1. Start `llama-server`.
+2. Verify the configured `providers.llama_cpp.base_url`.
+3. Confirm the running server exposes the configured model IDs.
 
-### No matching profile
+### Reasoning toggle unsupported
 
-Use `/models` to list configured profiles, then `/use <profile>`.
+Symptoms:
+
+- `/think off` reports that the provider does not support reasoning toggle
+
+Explanation:
+
+- `llama.cpp` does not currently use the Ollama-style think toggle in PATCH
+- handle reasoning behavior through your chosen model, prompt, and server configuration instead
+
+### Slow Pi replies
+
+Check:
+
+- `/perf` for `llm.generate` vs total turn time
+- `/system` for temperature and throttling
+- whether `fast` mode is active
+- whether the selected model/context is too heavy for the Pi

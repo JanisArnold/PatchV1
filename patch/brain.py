@@ -6,7 +6,7 @@ import time
 from typing import Dict, List, Optional
 
 from patch.config import AppConfig
-from patch.contracts import ChatMessage, MemoryFact, ModelProfile, ProviderResponse
+from patch.contracts import ChatMessage, MemoryFact, MemoryTask, ModelProfile, ProviderResponse, TurnPlan
 from patch.memory.store import SQLiteMemoryStore
 
 
@@ -94,13 +94,49 @@ class Brain:
         self.fact_extractor = RuleBasedFactExtractor()
         self.summary_service = SummaryService()
 
-    def generate_reply(self, user_text: str, profile: ModelProfile) -> tuple:
+    def classify_turn(self, user_text: str) -> str:
+        lowered = user_text.lower()
+        vision_keywords = ("what do you see", "look at", "camera", "image", "photo", "scene")
+        memory_keywords = ("remember", "what do you know", "what did i say", "my ", "i like", "i prefer", "my name")
+        complex_keywords = ("plan", "design", "compare", "analyze", "why", "how should", "architecture")
+        if any(keyword in lowered for keyword in vision_keywords):
+            return "vision_requested"
+        if any(keyword in lowered for keyword in memory_keywords):
+            return "memory_related"
+        if any(keyword in lowered for keyword in complex_keywords):
+            return "complex"
+        return "smalltalk"
+
+    def build_turn_plan(self, user_text: str, runtime_mode: str) -> tuple[TurnPlan, int]:
+        started = time.perf_counter()
+        turn_type = self.classify_turn(user_text)
+        if runtime_mode == "fast":
+            if turn_type == "smalltalk":
+                plan = TurnPlan(turn_type=turn_type, recent_turn_limit=3, include_summary=False, include_facts=False)
+            elif turn_type == "memory_related":
+                plan = TurnPlan(turn_type=turn_type, recent_turn_limit=4, include_summary=True, include_facts=True)
+            else:
+                plan = TurnPlan(turn_type=turn_type, recent_turn_limit=4, include_summary=True, include_facts=True)
+        elif runtime_mode == "vision_test":
+            plan = TurnPlan(turn_type=turn_type, recent_turn_limit=5, include_summary=True, include_facts=True)
+        else:
+            if turn_type == "smalltalk":
+                plan = TurnPlan(turn_type=turn_type, recent_turn_limit=4, include_summary=False, include_facts=False)
+            else:
+                plan = TurnPlan(turn_type=turn_type, recent_turn_limit=6, include_summary=True, include_facts=True)
+        classification_ms = int((time.perf_counter() - started) * 1000)
+        return plan, classification_ms
+
+    def generate_reply(self, user_text: str, profile: ModelProfile, runtime_mode: str) -> tuple:
         started_total = time.perf_counter()
+        turn_plan, classification_ms = self.build_turn_plan(user_text, runtime_mode)
         retrieval_started = time.perf_counter()
         bundle = self.memory_store.build_memory_bundle(
             query=user_text,
-            recent_turn_limit=self.config.recent_turn_limit,
+            recent_turn_limit=min(turn_plan.recent_turn_limit, self.config.recent_turn_limit),
             max_fact_hits=self.config.max_fact_hits,
+            include_summary=turn_plan.include_summary,
+            include_facts=turn_plan.include_facts,
         )
         retrieval_ms = int((time.perf_counter() - retrieval_started) * 1000)
         prompt_started = time.perf_counter()
@@ -116,15 +152,23 @@ class Brain:
             "prompt_tokens_estimate": response.prompt_tokens_estimate,
             "response_tokens_estimate": response.response_tokens_estimate,
             "latency_ms": latency_ms,
+            "classification_ms": classification_ms,
             "retrieval_ms": retrieval_ms,
             "prompt_build_ms": prompt_build_ms,
             "total_ms": total_ms,
             "profile": profile.name,
             "model": profile.model,
+            "runtime_mode": runtime_mode,
+            "turn_type": turn_plan.turn_type,
+            "turn_plan": {
+                "recent_turn_limit": turn_plan.recent_turn_limit,
+                "include_summary": turn_plan.include_summary,
+                "include_facts": turn_plan.include_facts,
+            },
         }
         return response.text, debug_info
 
-    def update_memory(
+    def create_memory_task(
         self,
         *,
         session_id: int,
@@ -132,19 +176,31 @@ class Brain:
         user_text: str,
         assistant_text: str,
         active_profile: ModelProfile,
-    ) -> None:
+    ) -> MemoryTask:
+        return MemoryTask(
+            session_id=session_id,
+            user_turn_id=user_turn_id,
+            user_text=user_text,
+            assistant_text=assistant_text,
+            active_profile_name=active_profile.name,
+        )
+
+    def process_memory_task(self, task: MemoryTask) -> None:
+        active_profile = self.config.model_profiles.get(task.active_profile_name)
+        if active_profile is None:
+            active_profile = next(iter(self.config.model_profiles.values()))
         fact_started = time.perf_counter()
-        for fact in self.fact_extractor.extract(user_text, assistant_text):
-            self.memory_store.upsert_fact(fact, source_turn_id=user_turn_id)
+        for fact in self.fact_extractor.extract(task.user_text, task.assistant_text):
+            self.memory_store.upsert_fact(fact, source_turn_id=task.user_turn_id)
         fact_extraction_ms = int((time.perf_counter() - fact_started) * 1000)
         self.memory_store.record_performance_log(
-            session_id=session_id,
-            phase="memory.fact_extraction",
+            session_id=task.session_id,
+            phase="background.memory.fact_extraction",
             latency_ms=fact_extraction_ms,
             metadata_json=json.dumps({"profile": active_profile.name}),
         )
 
-        total_turns = self.memory_store.get_turn_count(session_id)
+        total_turns = self.memory_store.get_turn_count(task.session_id)
         if total_turns % self.config.summary_turn_window != 0:
             return
 
@@ -160,14 +216,14 @@ class Brain:
             profile=summary_profile,
         )
         self.memory_store.save_summary(
-            session_id=session_id,
+            session_id=task.session_id,
             summary_text=summary_text,
             turn_count=total_turns,
         )
         summary_ms = int((time.perf_counter() - summary_started) * 1000)
         self.memory_store.record_performance_log(
-            session_id=session_id,
-            phase="memory.summary",
+            session_id=task.session_id,
+            phase="background.memory.summary",
             latency_ms=summary_ms,
             metadata_json=json.dumps(
                 {

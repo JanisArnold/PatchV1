@@ -100,7 +100,7 @@ class SQLiteMemoryStore:
     def __init__(self, database_path: Path) -> None:
         self.database_path = database_path
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(self.database_path)
+        self.connection = sqlite3.connect(self.database_path, timeout=30)
         self.connection.row_factory = sqlite3.Row
         self._ensure_schema()
 
@@ -218,11 +218,18 @@ class SQLiteMemoryStore:
             for row in fallback
         ]
 
-    def build_memory_bundle(self, query: str, recent_turn_limit: int, max_fact_hits: int) -> MemoryBundle:
+    def build_memory_bundle(
+        self,
+        query: str,
+        recent_turn_limit: int,
+        max_fact_hits: int,
+        include_summary: bool = True,
+        include_facts: bool = True,
+    ) -> MemoryBundle:
         return MemoryBundle(
             recent_turns=self.get_recent_turns(recent_turn_limit),
-            latest_summary=self.get_latest_summary(),
-            facts=self.get_relevant_facts(query=query, limit=max_fact_hits),
+            latest_summary=self.get_latest_summary() if include_summary else None,
+            facts=self.get_relevant_facts(query=query, limit=max_fact_hits) if include_facts else [],
         )
 
     def get_facts(self, limit: int = 20) -> List[Dict[str, object]]:

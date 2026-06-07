@@ -4,35 +4,23 @@
 
 - Windows, Linux, or macOS
 - Python 3.9+
-- Ollama installed locally
+- a running local inference server
 
-Recommended first models:
-
-- `gemma4:e2b`
-- `qwen3.5:2b`
-- `qwen3.5:4b`
+The current default path is `llama.cpp` via external `llama-server`.
 
 ## 1. Install Python dependencies
 
 ```powershell
 python -m venv .venv
-.venv\Scripts\Activate.ps1
+.\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
 
-## 2. Install and verify Ollama
+## 2. Start your local inference server
 
-After installing Ollama, verify the daemon is running:
+Start `llama-server` with a model ID that matches a profile in `config/settings.json`.
 
-```powershell
-ollama list
-```
-
-Pull at least one model:
-
-```powershell
-ollama pull gemma4:e2b
-```
+PATCH assumes the server is already running before you start the app.
 
 ## 3. Create your config
 
@@ -51,30 +39,24 @@ Optional environment variables:
 python -m patch.cli
 ```
 
-## 5. Next step after first run
+## 5. First commands
 
-After PATCH starts successfully, use [Testing Guide](testing.md) as the canonical workflow for:
+```text
+/help
+/models
+/mode
+/system
+```
 
-- command reference
+## 6. Next step after first run
+
+Use [Testing Guide](testing.md) as the canonical workflow for:
+
+- runtime mode testing
 - model comparison
-- benchmark usage
+- benchmarks
 - memory inspection
-
-## Clean-room reproduction checklist
-
-Another collaborator should be able to:
-
-1. Clone or copy the repo.
-2. Install Python.
-3. Install Ollama.
-4. Pull at least one documented model.
-5. Copy `config/settings.example.json`.
-6. Run `python -m patch.cli`.
-7. Run `/benchmark`.
-
-## Next step for Raspberry Pi
-
-This page covers local PC development.
+- Pi performance checks
 
 For Raspberry Pi setup and deployment, see:
 

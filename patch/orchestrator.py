@@ -4,10 +4,13 @@ import json
 import time
 from pathlib import Path
 
+from patch.adapters.display import NoOpDisplayAdapter
 from patch.adapters.text import TextInputAdapter, TextOutputAdapter
+from patch.adapters.vision import NoOpVisionAdapter
+from patch.background import MemoryMaintenanceWorker
 from patch.brain import Brain, render_debug_info
 from patch.config import AppConfig
-from patch.contracts import ModelProfile
+from patch.contracts import DisplayAdapter, ModelProfile, VisionAdapter
 from patch.memory.store import SQLiteMemoryStore
 from patch.system_metrics import collect_system_snapshot, render_system_snapshot
 
@@ -21,20 +24,28 @@ class Orchestrator:
         memory_store: SQLiteMemoryStore,
         input_adapter: TextInputAdapter,
         output_adapter: TextOutputAdapter,
+        background_worker: MemoryMaintenanceWorker,
+        display_adapter: DisplayAdapter | None = None,
+        vision_adapter: VisionAdapter | None = None,
     ) -> None:
         self.config = config
         self.brain = brain
         self.memory_store = memory_store
         self.input_adapter = input_adapter
         self.output_adapter = output_adapter
+        self.display_adapter = display_adapter or NoOpDisplayAdapter()
+        self.vision_adapter = vision_adapter or NoOpVisionAdapter()
+        self.background_worker = background_worker
         self.debug_enabled = config.debug
         self.active_profile = self._default_profile()
+        self.runtime_mode = config.runtime_mode
         self.session_id = self.memory_store.create_session()
 
     def run(self) -> None:
         self.output_adapter.emit(
-            f"{self.config.name} is online. Active profile: {self.active_profile.name}. Type /exit to quit."
+            f"{self.config.name} is online. Active profile: {self.active_profile.name}. Runtime mode: {self.runtime_mode}. Type /exit to quit."
         )
+        self._emit_state("idle")
         while True:
             try:
                 user_text = self.input_adapter.get_input()
@@ -49,44 +60,59 @@ class Orchestrator:
                     break
                 continue
 
-            turn_started = time.perf_counter()
-            user_turn_id = self.memory_store.save_turn(self.session_id, "user", user_text)
-            try:
-                reply, debug_info = self.brain.generate_reply(user_text, self.active_profile)
-            except RuntimeError as exc:
-                self.output_adapter.emit(f"Model error: {exc}")
+            reply = self.handle_text_turn(user_text)
+            if reply is None:
                 continue
-
-            self.memory_store.save_turn(self.session_id, "assistant", reply)
-            self.brain.update_memory(
-                session_id=self.session_id,
-                user_turn_id=user_turn_id,
-                user_text=user_text,
-                assistant_text=reply,
-                active_profile=self.active_profile,
-            )
-            turn_total_ms = int((time.perf_counter() - turn_started) * 1000)
-            self.memory_store.record_performance_log(
-                session_id=self.session_id,
-                phase="turn.total",
-                latency_ms=turn_total_ms,
-                metadata_json=json.dumps(
-                    {
-                        "profile": self.active_profile.name,
-                        "model": self.active_profile.model,
-                        "retrieval_ms": debug_info.get("retrieval_ms"),
-                        "prompt_build_ms": debug_info.get("prompt_build_ms"),
-                        "llm_ms": debug_info.get("latency_ms"),
-                        "total_ms": debug_info.get("total_ms"),
-                    }
-                ),
-            )
-            self._record_system_snapshot(source="turn")
             self.output_adapter.emit(reply)
-            if self.debug_enabled:
-                self.output_adapter.emit(render_debug_info(debug_info))
 
         self.memory_store.end_session(self.session_id)
+
+    def close(self) -> None:
+        self.background_worker.close()
+        self.memory_store.close()
+
+    def handle_text_turn(self, user_text: str) -> str | None:
+        turn_started = time.perf_counter()
+        self._emit_state("listening")
+        input_latency_ms = int((time.perf_counter() - turn_started) * 1000)
+        user_turn_id = self.memory_store.save_turn(self.session_id, "user", user_text)
+        self._record_performance(
+            phase="input.capture",
+            latency_ms=input_latency_ms,
+            metadata={"mode": "text", "runtime_mode": self.runtime_mode},
+        )
+        try:
+            self._emit_state("thinking")
+            reply, debug_info = self.brain.generate_reply(user_text, self.active_profile, self.runtime_mode)
+        except RuntimeError as exc:
+            self._emit_state("error")
+            self.output_adapter.emit(f"Model error: {exc}")
+            return None
+
+        self.memory_store.save_turn(self.session_id, "assistant", reply)
+        memory_task = self.brain.create_memory_task(
+            session_id=self.session_id,
+            user_turn_id=user_turn_id,
+            user_text=user_text,
+            assistant_text=reply,
+            active_profile=self.active_profile,
+        )
+        enqueue_started = time.perf_counter()
+        self.background_worker.submit(memory_task)
+        background_enqueue_ms = int((time.perf_counter() - enqueue_started) * 1000)
+        self._record_performance(
+            phase="background.enqueue",
+            latency_ms=background_enqueue_ms,
+            metadata={"profile": self.active_profile.name},
+        )
+        turn_total_ms = int((time.perf_counter() - turn_started) * 1000)
+        self._record_core_timings(debug_info, turn_total_ms)
+        self._record_system_snapshot(source="turn")
+        self._emit_state("speaking")
+        if self.debug_enabled:
+            self.output_adapter.emit(render_debug_info(debug_info))
+        self._emit_state("idle")
+        return reply
 
     def _handle_command(self, command_text: str) -> bool:
         command, _, argument = command_text.partition(" ")
@@ -101,6 +127,9 @@ class Orchestrator:
             return False
         if command == "/models":
             self._show_models()
+            return False
+        if command == "/mode":
+            self._switch_mode(argument)
             return False
         if command == "/use":
             self._switch_profile(argument)
@@ -143,18 +172,22 @@ class Orchestrator:
         lines = ["Configured profiles:"]
         for name, profile in self.config.model_profiles.items():
             active_marker = " (active)" if name == self.active_profile.name else ""
+            extras: list[str] = []
+            if profile.model_path:
+                extras.append(f"path={profile.model_path}")
             think_value = profile.options.get("think")
-            think_suffix = ""
             if think_value is not None:
-                think_suffix = f", think={'on' if bool(think_value) else 'off'}"
-            lines.append(f"- {name}: {profile.model}{think_suffix}{active_marker}")
+                extras.append(f"think={'on' if bool(think_value) else 'off'}")
+            suffix = f" ({', '.join(extras)})" if extras else ""
+            lines.append(f"- {name}: {profile.model}{suffix}{active_marker}")
 
-        provider = self.brain.provider_registry[self.config.active_provider]
+        provider = self.brain.provider_registry[self.active_profile.provider]
         ok, message = provider.healthcheck()
         lines.append("")
+        lines.append(f"Runtime mode: {self.runtime_mode}")
         lines.append(f"Provider health: {message}")
         if ok:
-            lines.append("Available Ollama models:")
+            lines.append(f"Available {self.active_profile.provider} models:")
             for model_name in provider.list_models():
                 lines.append(f"- {model_name}: {provider.estimate_capabilities(model_name)}")
         self.output_adapter.emit("\n".join(lines))
@@ -163,9 +196,10 @@ class Orchestrator:
         lines = [
             "Available commands:",
             "/help - Show this command list.",
-            "/models - List configured profiles and available Ollama models.",
+            "/models - List configured profiles and provider-visible models.",
+            "/mode [fast|balanced|vision_test] - Show or switch the runtime mode.",
             "/use <profile-or-model> - Switch the active model/profile.",
-            "/reasoning on|off - Toggle Ollama thinking for the active profile.",
+            "/reasoning on|off - Toggle provider reasoning if supported.",
             "/think on|off - Alias for /reasoning on|off.",
             "/memory - Show recent stored conversation rows.",
             "/facts - Show extracted durable facts.",
@@ -220,6 +254,16 @@ class Orchestrator:
         )
         self.output_adapter.emit(f"Using ad-hoc model {argument} with current profile settings.")
 
+    def _switch_mode(self, argument: str) -> None:
+        if not argument:
+            self.output_adapter.emit(f"Runtime mode: {self.runtime_mode}")
+            return
+        if argument not in {"fast", "balanced", "vision_test"}:
+            self.output_adapter.emit("Usage: /mode fast|balanced|vision_test")
+            return
+        self.runtime_mode = argument
+        self.output_adapter.emit(f"Runtime mode set to {self.runtime_mode}.")
+
     def _toggle_debug(self, argument: str) -> None:
         if argument.lower() in {"on", "true", "1"}:
             self.debug_enabled = True
@@ -231,6 +275,12 @@ class Orchestrator:
         self.output_adapter.emit(f"Debug mode {'enabled' if self.debug_enabled else 'disabled'}.")
 
     def _toggle_reasoning(self, argument: str) -> None:
+        provider = self.brain.provider_registry[self.active_profile.provider]
+        if not provider.supports_reasoning_toggle(self.active_profile):
+            self.output_adapter.emit(
+                f"Reasoning toggle is not supported by provider {self.active_profile.provider}."
+            )
+            return
         value = argument.lower()
         if value in {"off", "false", "0", "nothink"}:
             self.active_profile.options["think"] = False
@@ -277,3 +327,44 @@ class Orchestrator:
             arm_clock_hz=snapshot.get("arm_clock_hz"),
             metadata_json=json.dumps(snapshot),
         )
+
+    def _record_performance(self, *, phase: str, latency_ms: int, metadata: dict[str, object]) -> None:
+        self.memory_store.record_performance_log(
+            session_id=self.session_id,
+            phase=phase,
+            latency_ms=latency_ms,
+            metadata_json=json.dumps(metadata),
+        )
+
+    def _record_core_timings(self, debug_info: dict[str, object], turn_total_ms: int) -> None:
+        phase_map = {
+            "turn.classification": debug_info.get("classification_ms"),
+            "memory.retrieval": debug_info.get("retrieval_ms"),
+            "prompt.assembly": debug_info.get("prompt_build_ms"),
+            "llm.generate": debug_info.get("latency_ms"),
+            "turn.total": turn_total_ms,
+        }
+        base_metadata = {
+            "profile": self.active_profile.name,
+            "model": self.active_profile.model,
+            "runtime_mode": self.runtime_mode,
+            "turn_type": debug_info.get("turn_type"),
+        }
+        for phase, latency_ms in phase_map.items():
+            self._record_performance(
+                phase=phase,
+                latency_ms=int(latency_ms or 0),
+                metadata=base_metadata,
+            )
+
+    def _emit_state(self, state: str) -> None:
+        started = time.perf_counter()
+        self.display_adapter.on_state_change(state)
+        display_ms = int((time.perf_counter() - started) * 1000)
+        self._record_performance(
+            phase="display.state_update",
+            latency_ms=display_ms,
+            metadata={"state": state, "display_enabled": self.config.display_enabled},
+        )
+        if self.debug_enabled:
+            self.output_adapter.emit(f"[state] {state}")

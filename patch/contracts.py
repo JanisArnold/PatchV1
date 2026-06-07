@@ -16,6 +16,7 @@ class ModelProfile:
     provider: str
     model: str
     system_prompt: str
+    model_path: Optional[str] = None
     temperature: float = 0.4
     top_p: float = 0.9
     num_ctx: int = 4096
@@ -45,6 +46,23 @@ class ProviderResponse:
     raw: Dict[str, object] = field(default_factory=dict)
 
 
+@dataclass
+class TurnPlan:
+    turn_type: str
+    recent_turn_limit: int
+    include_summary: bool
+    include_facts: bool
+
+
+@dataclass
+class MemoryTask:
+    session_id: int
+    user_turn_id: int
+    user_text: str
+    assistant_text: str
+    active_profile_name: str
+
+
 class ChatProvider(Protocol):
     def generate_reply(self, messages: List[ChatMessage], model_profile: ModelProfile) -> ProviderResponse:
         ...
@@ -56,6 +74,9 @@ class ChatProvider(Protocol):
         ...
 
     def estimate_capabilities(self, model_name: str) -> str:
+        ...
+
+    def supports_reasoning_toggle(self, model_profile: ModelProfile) -> bool:
         ...
 
 
@@ -81,4 +102,14 @@ class InputAdapter(Protocol):
 
 class OutputAdapter(Protocol):
     def emit(self, text: str) -> None:
+        ...
+
+
+class DisplayAdapter(Protocol):
+    def on_state_change(self, state: str) -> None:
+        ...
+
+
+class VisionAdapter(Protocol):
+    def capture_scene_description(self, prompt: Optional[str] = None) -> Optional[str]:
         ...

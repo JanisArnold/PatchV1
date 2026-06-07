@@ -2,143 +2,80 @@
 
 ## Goal
 
-Use your PC for development, then deploy the same project onto the Raspberry Pi for testing. The Pi should be treated as a target machine, not the main development environment.
+Use your PC for development and the Pi as the target integration machine. The current Pi-first runtime assumes:
 
-## Recommended Pi baseline for V1
+- Raspberry Pi OS Lite 64-bit
+- `llama.cpp` as the local inference runtime
+- ALSA for first audio bring-up
+- Vosk for STT
+- Piper for TTS
+
+## Recommended baseline
 
 - Raspberry Pi 4 with 8 GB RAM
 - Raspberry Pi OS Lite 64-bit
 - SSH enabled
-- camera enabled later when hardware arrives
 - reliable power supply
-- Wi-Fi or Ethernet
+- active cooling if possible
 
-For the current PATCH phase, `Lite 64-bit` is the recommended choice because:
-
-- PATCH is still terminal-first
-- the Pi should stay as lean as possible
-- you do not need the desktop environment yet
-- the Pi 4 benefits from the 64-bit OS for heavier local compute tasks
-
-## 1. Flash the OS
+## 1. Flash and boot
 
 Use Raspberry Pi Imager and choose:
 
 - `Raspberry Pi OS Lite (64-bit)`
 
-Before writing the SD card, open the advanced options and set:
+Before writing the SD card, set:
 
 - hostname: `patch-pi`
-- username
-- password
-- Wi-Fi SSID and password if needed
-- enable SSH
-- locale and keyboard layout
+- username and password
+- Wi-Fi if needed
+- SSH enabled
 
-## 2. First boot checks
+If `patch-pi.local` does not resolve on your PC later, use the Pi IP address instead.
 
-After the Pi starts, connect from your PC:
-
-```powershell
-ssh <your-user>@patch-pi.local
-```
-
-If `patch-pi.local` does not resolve on your PC, use the Pi's current IP address instead. This is commonly a local hostname resolution issue on the client machine or network, not a Pi problem.
-
-Then update the Pi:
+## 2. Base packages
 
 ```bash
 sudo apt update
 sudo apt full-upgrade -y
-sudo reboot
+sudo apt install -y python3 python3-venv python3-pip git sqlite3 curl alsa-utils ffmpeg unzip
 ```
 
-Reconnect and verify:
-
-```bash
-uname -a
-python3 --version
-free -h
-```
-
-## 3. Enable core Pi features
-
-Open Raspberry Pi configuration:
-
-```bash
-sudo raspi-config
-```
-
-Recommended settings:
-
-- enable camera interface when you have the camera
-- confirm SSH is enabled
-- set timezone and locale correctly
-- set hostname if not already done
-
-## 4. Install system packages
-
-Install the base packages PATCH will need:
-
-```bash
-sudo apt update
-sudo apt install -y python3 python3-venv python3-pip git sqlite3 curl
-```
-
-Optional but useful later:
-
-```bash
-sudo apt install -y libcamera-apps alsa-utils ffmpeg
-```
-
-## 5. Get PATCH onto the Pi
-
-The recommended workflow is to clone the repository directly on the Pi.
+## 3. Clone PATCH
 
 ```bash
 git clone <your-repo-url> ~/patch
 cd ~/patch
-```
-
-Why this is the preferred path:
-
-- easiest to keep the Pi updated
-- avoids copying local desktop artifacts
-- cleanest public-repo workflow
-- matches the contributor documentation
-
-After cloning:
-
-```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp config/settings.example.json config/settings.json
 ```
 
-The `~/patch` directory will be created by the clone step. Runtime files such as the SQLite database will be created automatically later when PATCH starts.
+## 4. Install `llama.cpp`
 
-## 6. Install Ollama on the Pi
+PATCH V1 assumes you start `llama-server` yourself.
 
-Do this only if the Pi itself should run the local model.
-
-Check current Raspberry Pi support and install instructions from Ollama before relying on this for V1. If Pi performance is too limited, keep PATCH on the Pi but move heavier inference to a stronger machine later.
-
-After installation, verify:
+A typical flow is:
 
 ```bash
-ollama list
+git clone https://github.com/ggml-org/llama.cpp ~/llama.cpp
+cd ~/llama.cpp
+cmake -B build
+cmake --build build --config Release -j4
 ```
 
-Pull a small model first:
+Then start the server with your chosen GGUF model and tuned flags. Keep the model ID aligned with the PATCH profile names in `config/settings.json`.
+
+Example shape:
 
 ```bash
-ollama pull gemma4:e2b
+~/llama.cpp/build/bin/llama-server -m /home/<your-user>/models/gemma4-e2b-q4.gguf --host 127.0.0.1 --port 8080
 ```
 
-## 7. First PATCH startup on the Pi
+PATCH expects the server to stay running while it is active.
 
-Start in terminal mode first:
+## 5. First PATCH startup
 
 ```bash
 cd ~/patch
@@ -146,127 +83,70 @@ source .venv/bin/activate
 python3 -m patch.cli
 ```
 
-Before adding any hardware features, confirm:
+First checks inside PATCH:
 
-1. PATCH starts successfully
-2. Ollama is reachable
-3. SQLite memory is created
-4. `/models` works
-5. `/facts` works
-6. `/benchmark` works
+```text
+/help
+/models
+/mode
+/system
+```
 
-Only after that should you move on to audio, camera, or display integration.
+## 6. Audio bring-up
 
-## 8. Prepare for future hardware
-
-When your hardware arrives, add and test these one at a time:
-
-- display
-- microphone
-- speaker
-- camera
-
-Do not connect all peripherals and debug everything at once. Bring up one subsystem at a time.
-
-## 9. First audio hardware test
-
-Before integrating speech into PATCH, test the microphone and speaker directly with ALSA.
-
-List audio devices:
+List devices:
 
 ```bash
 arecord -l
 aplay -l
 ```
 
-For a USB microphone, the capture device may appear as something like:
-
-- `card 3, device 0`
-- `USB PnP Sound Device`
-
-Test live microphone levels:
+Typical USB mic test:
 
 ```bash
 arecord -D plughw:3,0 -vv -f cd -d 10 /dev/null
-```
-
-Test recording:
-
-```bash
 arecord -D plughw:3,0 -d 5 -f cd test-mic.wav
-```
-
-Then test playback:
-
-```bash
 aplay -D plughw:0,0 test-mic.wav
 ```
 
-For small single-speaker output, mono-style playback is often clearer than stereo channel tests. If `speaker-test -c 2` sounds uneven between left and right, that is not necessarily a blocker for PATCH.
-
-Mic gain can be adjusted with:
+If levels are too low, use:
 
 ```bash
 alsamixer -c 3
 ```
 
-Useful controls for many USB mics:
+For a simple mono speech output path, a clear single-speaker result is good enough for PATCH.
 
-- `Mic`
-- `Auto Gain Control`
+## 7. Install Pi voice dependencies
 
-If close-range speech becomes understandable with `Mic` at a high level, the microphone is good enough for first PATCH integration.
+PATCH’s standalone voice loop needs extra Pi packages that are not part of the base Python requirements yet.
 
-## 10. First voice software test
-
-After raw audio devices work, test text-to-speech outside PATCH first.
-
-Inside the PATCH virtual environment:
+Inside the PATCH venv:
 
 ```bash
-cd ~/patch
-source .venv/bin/activate
-python3 -m pip install --upgrade pip
 python3 -m pip install piper-tts vosk
 ```
 
-Create a local voice folder:
+Download a Vosk model and a Piper voice into the configured paths.
+
+## 8. First voice-loop test
+
+After Vosk and Piper are installed:
 
 ```bash
-mkdir -p ~/patch/voices
+python3 -m patch.voice_loop_test
 ```
 
-Download a first Piper voice:
+This gives you:
 
-```bash
-python3 -m piper.download_voices --data-dir ~/patch/voices en_US-lessac-medium
-```
+- mic capture
+- STT
+- PATCH reply generation
+- TTS
+- speaker playback
+- stage-level performance logs
 
-Generate a WAV file:
-
-```bash
-python3 -m piper --data-dir ~/patch/voices -m en_US-lessac-medium -f test-tts.wav -- "Hello, I am Patch. This is my first voice test on the Raspberry Pi."
-```
-
-Play it back through the working output:
-
-```bash
-aplay -D plughw:0,0 test-tts.wav
-```
-
-This validates the Pi TTS path before integrating it into PATCH.
-
-For speech-to-text, the recommended first path is `Vosk` because it is lighter than Whisper-based options on a Pi 4.
-
-Recommended next STT step after TTS succeeds:
-
-- record one mic sample with `arecord`
-- run a minimal Vosk transcription test
-- only then integrate STT into PATCH
-
-## 11. Performance and temperature checks
-
-When testing on the Pi, use both PATCH-level and shell-level checks.
+## 9. Performance and temperature checks
 
 Inside PATCH:
 
@@ -283,21 +163,12 @@ vcgencmd get_throttled
 vcgencmd measure_clock arm
 ```
 
-What to watch:
-
-- temperature while idle
-- temperature during model replies
-- whether throttling flags appear
-- whether total PATCH turn time is much larger than pure model time
-
-If a fan meaningfully lowers temperature and throttling disappears, that should also show up in your repeated `/system` snapshots and faster interaction timings.
+If your fan is helping, repeated `/system` snapshots should show lower temperature and fewer throttling events during reply generation.
 
 ## Practical advice
 
-- Develop on your PC.
-- Keep the Pi as the integration target.
-- Start with text mode on the Pi too before adding voice or vision.
-- If SD card performance becomes annoying later, move models or app data to a USB SSD.
-- Use one local model first and optimize that path before adding cloud, camera loops, or always-on voice features.
-- Treat `git clone` on the Pi as the default deployment path unless you have a specific reason to copy files manually.
-- On Pi OS Lite, expect ALSA tools such as `arecord`, `aplay`, and `alsamixer` to be the first useful audio test tools before any higher-level audio stack is added.
+- keep one model loaded and warm
+- use `fast` mode on the Pi first
+- keep context small
+- keep camera disabled until the audio loop feels good
+- treat the screen as an event-driven state consumer later, not part of the reply bottleneck

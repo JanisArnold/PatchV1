@@ -6,17 +6,23 @@ PATCH loads JSON configuration from:
 2. `config/settings.json`
 3. `config/settings.example.json`
 
-For public sharing and commits, only the example config should be tracked. Keep `config/settings.json` local.
+Only the example config should be committed.
 
 ## Main sections
 
 ### `app`
 
-- `name`: assistant display name
-- `data_dir`: location for database and runtime files
-- `benchmark_prompt_path`: prompt set used by `/benchmark`
-- `debug`: default debug mode
-- `default_profile`: the profile PATCH starts with for normal use
+- `name`
+- `data_dir`
+- `benchmark_prompt_path`
+- `debug`
+- `default_profile`
+- `runtime_mode`
+  - `fast`
+  - `balanced`
+  - `vision_test`
+- `display_enabled`
+- `camera_enabled`
 
 ### `memory`
 
@@ -26,11 +32,25 @@ For public sharing and commits, only the example config should be tracked. Keep 
 
 ### `providers`
 
-- `active`: current provider key
-- `ollama.base_url`
-- `ollama.timeout_seconds`
-- `cloud.enabled`: reserved for future cloud fallback
-- `cloud.mode`: intended routing policy, currently `heavy_load_only`
+- `active`
+- `llama_cpp.base_url`
+- `llama_cpp.timeout_seconds`
+- `llama_cpp.external_server`
+- `ollama.*`
+  Kept for compatibility and comparison, but no longer the default Pi path.
+- `cloud.*`
+  Reserved for future heavy-load fallback.
+
+### `audio`
+
+- `input_device`
+- `output_device`
+- `record_seconds`
+- `vosk_model_path`
+- `piper_voice_dir`
+- `piper_voice_name`
+
+These are used by the standalone Pi voice-loop harness and prepare the main runtime for later audio integration.
 
 ### `model_profiles`
 
@@ -38,17 +58,26 @@ Each profile defines:
 
 - `provider`
 - `model`
+- `model_path`
+  Stored now so PATCH is ready for future server-launch management later.
 - `temperature`
-- `num_ctx`
 - `top_p`
+- `num_ctx`
 - `system_prompt`
 
-Recommended structure:
+Recommended pattern:
 
-- `default`: the current winning local model for normal use
-- model-named test profiles such as `gemma4:e2b`, `qwen3.5:2b`, `qwen3.5:4b`
+- `default`
+  The active Pi winner.
+- model-named test profiles
+  Separate local candidates for benchmarking and comparison.
 
-PATCH does not need to run all of these in production. They are primarily there so you can benchmark and switch clearly during testing, while `default` remains the one real startup choice.
+## Current default strategy
+
+- one active local `llama.cpp` model
+- one runtime mode chosen at startup
+- manual model switching only when testing
+- reasoning off by default on the Pi
 
 ## Example
 

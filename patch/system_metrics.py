@@ -12,8 +12,11 @@ def collect_system_snapshot() -> Dict[str, object]:
         "temperature_c": None,
         "throttled_hex": None,
         "arm_clock_hz": None,
+        "memory_total_mb": None,
+        "memory_available_mb": None,
         "vcgencmd_available": False,
     }
+    snapshot.update(_read_meminfo())
 
     vcgencmd = shutil.which("vcgencmd")
     if not vcgencmd:
@@ -73,3 +76,28 @@ def _parse_clock(raw: Optional[str]) -> Optional[int]:
         return int(raw.split("=", 1)[1].strip())
     except ValueError:
         return None
+
+
+def _read_meminfo() -> Dict[str, Optional[int]]:
+    meminfo_path = "/proc/meminfo"
+    try:
+        with open(meminfo_path, "r", encoding="utf-8") as handle:
+            rows = handle.readlines()
+    except OSError:
+        return {"memory_total_mb": None, "memory_available_mb": None}
+
+    values: Dict[str, int] = {}
+    for row in rows:
+        if ":" not in row:
+            continue
+        key, value = row.split(":", 1)
+        try:
+            values[key.strip()] = int(value.strip().split()[0])
+        except (IndexError, ValueError):
+            continue
+    total_kb = values.get("MemTotal")
+    available_kb = values.get("MemAvailable")
+    return {
+        "memory_total_mb": None if total_kb is None else int(total_kb / 1024),
+        "memory_available_mb": None if available_kb is None else int(available_kb / 1024),
+    }
