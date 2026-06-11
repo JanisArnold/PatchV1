@@ -26,18 +26,6 @@ class OllamaChatProvider:
         models = payload.get("models", [])
         return [item["name"] for item in models if "name" in item]
 
-    def estimate_capabilities(self, model_name: str) -> str:
-        lower = model_name.lower()
-        if "7b" in lower or "8b" in lower:
-            return "Balanced local reasoning on desktop-class hardware."
-        if "2b" in lower or "3b" in lower:
-            return "Fast lightweight chat with lower reasoning depth."
-        return "Capability estimate unknown; test with /benchmark."
-
-    def supports_reasoning_toggle(self, model_profile: ModelProfile) -> bool:
-        del model_profile
-        return True
-
     def generate_reply(self, messages: List[ChatMessage], model_profile: ModelProfile) -> ProviderResponse:
         # "think" and "max_tokens" are PATCH-level options, not Ollama runtime
         # options; map or hoist them instead of passing them through.

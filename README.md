@@ -3,13 +3,13 @@
 PATCH is a self-contained, offline AI desktop companion: everything runs locally, no cloud calls, full privacy. This repo is the Pi-first brain runtime. It currently supports:
 
 - terminal chat with token streaming
-- three-tier memory: rolling context, episodic retrieval, and durable SQLite facts
+- three-tier memory: rolling context, episodic retrieval (SQLite FTS5/BM25), and durable facts
 - `llama.cpp` via external `llama-server` (Gemma 4 E2B QAT is the target model)
-- per-turn thinking control (`auto` keeps reasoning off for chat, on for hard questions)
+- thinking off by default (`/reasoning on` for the rare question that needs it — reasoning tokens are unaffordable at Pi speeds)
 - runtime modes tuned for Pi latency
-- background memory maintenance off the hot path
-- per-stage performance logging, including time-to-first-token
-- a standalone Pi voice-loop harness (whisper.cpp or Vosk + Piper) with sentence-streamed TTS
+- background memory distillation (summary + fact extraction in one LLM call) that waits for foreground turns to finish
+- lightweight JSONL performance logging: one record per turn, including time-to-first-token
+- a standalone Pi voice-loop harness (whisper.cpp or Vosk + Piper) with push-to-talk recording and sentence-streamed TTS
 
 ## Guiding constraints
 
@@ -66,7 +66,6 @@ Keep local-only:
 - [Configuration](docs/configuration.md) - config schema, profiles, and runtime modes
 - [Memory](docs/memory.md) - three-tier memory design and retrieval
 - [Operations](docs/operations.md) - runtime files and diagnostics
-- [V1 Roadmap](docs/v1-roadmap.md) - summary pointer to the main roadmap
 - [Roadmap](roadmap.md) - staged plan from CLI to voice, display, camera, and Pi optimization
 
 ## Contributing

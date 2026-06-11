@@ -98,13 +98,17 @@ Start the server with Pi-tuned flags:
   --host 127.0.0.1 --port 8080 \
   -t 4 -tb 4 --prio 3 \
   -fa auto \
+  --parallel 1 \
   --ctx-size 2048
 ```
 
 - `-t 4 -tb 4`: use all 4 cores for generation and batch processing
 - `--prio 3`: give inference scheduling priority
 - `-fa auto`: enable Flash Attention
+- `--parallel 1`: **important** — one request at a time. PATCH's background memory distillation talks to the same server; with parallel slots it would run concurrently with your turn and roughly halve generation speed. With one slot, requests queue instead.
 - `--ctx-size 2048`: smaller KV cache, less memory traffic per token (4096 on a Pi 5)
+
+If the model still produces hidden thinking tokens despite `think: false` in the PATCH profile, add `--jinja --reasoning-budget 0` to force them off at the server.
 
 Keep the model ID aligned with the PATCH profile names in `config/settings.json`.
 
@@ -252,6 +256,6 @@ If your fan is helping, repeated `/system` snapshots should show lower temperatu
 - keep one model loaded and warm via `llama-server`
 - use `fast` mode on the Pi first
 - keep context small; let `max_tokens` and a "be concise" system prompt cap replies
-- keep thinking on `auto` — the reasoning channel burns tokens you'll never speak
+- keep thinking off (`think: false`) — the reasoning channel burns tokens you'll never speak; `/reasoning on` exists for the rare question that needs it
 - keep camera disabled until the audio loop feels good
 - treat the screen as an event-driven state consumer, not part of the reply bottleneck

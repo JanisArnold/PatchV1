@@ -33,7 +33,7 @@ Only the example config should be committed. Missing keys fall back to sensible 
 - `summary_turn_window`
 - `episodic_enabled` (default `true`)
 - `episodic_backend`
-  - `keyword` (default): zero-dependency token-overlap retrieval in SQLite
+  - `keyword` (default): zero-dependency FTS5/BM25 retrieval in SQLite
   - `lancedb`: disk-based vectors + `all-MiniLM-L6-v2` embeddings (`pip install lancedb sentence-transformers`)
 - `max_episodic_hits` (default `3` — keep retrieval aggressive; prompt size is latency)
 
@@ -53,6 +53,7 @@ Only the example config should be committed. Missing keys fall back to sensible 
 - `input_device`
 - `output_device`
 - `record_seconds`
+  Maximum recording length for the voice loop. Recording is push-to-talk style (Enter to stop), so this is a safety cap, not a fixed duration.
 - `stt_engine`
   - `whisper_cpp` (default, per the spec: `small.en`, int8)
   - `vosk` (fallback)
@@ -79,8 +80,7 @@ Each profile defines:
 - `max_tokens`
   Hard cap on reply length. A companion doesn't need to monologue, and every saved token is saved seconds on a Pi.
 - `think`
-  - `true` / `false`: force thinking mode on or off
-  - `"auto"` (recommended): thinking off for chat, on for complex turns — speed for depth, deliberately
+  `true` / `false`. **Keep it `false` on the Pi**: thinking tokens are generated and discarded before the reply, and at ~2.3 tok/s a single thinking turn costs over a minute. Toggle per session with `/reasoning on|off` when a question genuinely needs it.
 - `system_prompt`
   Ask for concise replies here; it is free latency.
 
@@ -95,7 +95,7 @@ Recommended pattern:
 
 - one active local `llama.cpp` model, kept warm via external `llama-server`
 - one runtime mode chosen at startup
-- streaming on, reply caps on, thinking on `auto`
+- streaming on, reply caps on, thinking off
 - manual model switching only when testing
 
 ## Example

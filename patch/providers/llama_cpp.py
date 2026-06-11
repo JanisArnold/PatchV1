@@ -26,22 +26,6 @@ class LlamaCppChatProvider:
         models = payload.get("data", [])
         return [item["id"] for item in models if isinstance(item, dict) and "id" in item]
 
-    def estimate_capabilities(self, model_name: str) -> str:
-        lower = model_name.lower()
-        if "9b" in lower or "8b" in lower or "7b" in lower:
-            return "Stronger local reasoning with a higher Pi/desktop cost."
-        if "4b" in lower or "e4b" in lower:
-            return "Balanced local chat that may still be heavy on a Pi 4."
-        if "2b" in lower or "3b" in lower or "e2b" in lower:
-            return "Pi-friendly local chat if the GGUF quantization is efficient."
-        return "Capability estimate unknown; test with /benchmark and /perf."
-
-    def supports_reasoning_toggle(self, model_profile: ModelProfile) -> bool:
-        del model_profile
-        # Forwarded as chat_template_kwargs.enable_thinking; models without a
-        # thinking channel simply ignore it.
-        return True
-
     def generate_reply(self, messages: List[ChatMessage], model_profile: ModelProfile) -> ProviderResponse:
         body = self._build_body(messages, model_profile, stream=False)
         payload = self._request_json("POST", "/v1/chat/completions", body)

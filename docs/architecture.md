@@ -21,36 +21,41 @@ Two rules drive the design:
 - `orchestrator`
   Owns commands, turn lifecycle, runtime mode, state changes, streaming fan-out, and background task dispatch.
 - `brain`
-  Classifies turns, chooses a minimal retrieval plan (including per-turn thinking), builds prompts, and talks to the configured provider.
+  Classifies turns, chooses a minimal retrieval plan, builds prompts, and talks to the configured provider. Also hosts the `MemoryDistiller`, the single background LLM prompt that refreshes the summary and extracts facts.
 - `memory`
-  Three tiers: recent turns, episodic exchanges, and durable facts, all in SQLite (episodic optionally in LanceDB). Also stores benchmarks, performance logs, and system snapshots.
+  Three tiers: recent turns, episodic exchanges, and durable facts, all in SQLite. Facts and episodes are indexed with SQLite FTS5 and ranked with BM25 (episodic optionally in LanceDB with vector search).
 - `streaming`
   `SentenceAssembler` turns the token stream into complete sentences so TTS can start speaking early.
+- `perf`
+  Append-only JSONL performance log: one line per turn instead of many SQLite rows. On a Pi, telemetry must stay cheaper than the work it measures.
 - `providers`
   Runtime integrations. `llama.cpp` via external `llama-server` is the default target and supports SSE streaming, prompt caching, reply caps, and a thinking toggle.
 - `adapters`
   Input/output backends plus reserved display and vision slots.
 - `background worker`
-  Handles fact extraction, episodic indexing, and summary generation after the user already has the reply. It owns its own SQLite connection (created inside the worker thread) and survives individual task failures.
+  Handles episodic indexing and summary/fact distillation after the user already has the reply. It owns its own SQLite connection (created inside the worker thread) and survives individual task failures. It waits for the foreground to go idle before each task, so a background LLM call never competes with the user's turn for the single `llama-server`.
 
 ## Hot path vs background path
 
 ### Hot path
 
 - text input now, STT transcript later
-- cheap turn classification (also decides thinking on/off for `think: "auto"` profiles)
+- cheap turn classification (decides how much memory to retrieve — nothing else)
 - selective retrieval: facts + top-3 episodic memories only when the turn needs them
 - `llama.cpp` reply generation, streamed
 - token stream -> terminal, or sentence stream -> TTS
 
 ### Background path
 
-- durable fact extraction
 - episodic index writes (embedding happens here, never on the hot path)
-- rolling summary generation
+- every `summary_turn_window` turns: one distillation LLM call that updates the rolling summary *and* extracts durable facts (one prompt, two outputs)
 - future: consolidation of old episodes into compact facts
 
-This split keeps the Pi focused on user-visible latency. SQLite runs in WAL mode so the two paths write through separate connections without blocking each other.
+This split keeps the Pi focused on user-visible latency. SQLite runs in WAL mode so the two paths write through separate connections without blocking each other, and the worker waits for an idle signal before each task so background LLM calls queue behind foreground turns instead of running concurrently with them.
+
+## Thinking policy
+
+Reasoning ("thinking") tokens are generated and then discarded before the spoken reply. At Pi speeds (~2.3 tok/s) a wrong heuristic that enables thinking costs ~90 seconds per turn, far more than thinking gains on a typical companion question. So thinking is **off by default**, set per profile (`think: false`) and toggled per session with `/reasoning on|off`. There is no automatic per-turn thinking decision.
 
 ## Turn ordering
 
@@ -59,7 +64,7 @@ The user turn is saved to memory only after generation completes. This matters: 
 ## Runtime modes
 
 - `fast`
-  Pi default. Minimal retrieval, small context, thinking off unless the turn is complex.
+  Pi default. Minimal retrieval and small context.
 - `balanced`
   Richer retrieval for desktop or slower exploratory testing.
 - `vision_test`
@@ -70,8 +75,7 @@ The user turn is saved to memory only after generation completes. This matters: 
 The orchestrator emits runtime states:
 
 - `idle`
-- `listening`
-- `thinking` (from STT-finish until the first token — the natural "pondering eyes" window)
+- `thinking` (from input until the first token — the natural "pondering eyes" window)
 - `speaking` (from the first streamed token)
 - `error`
 

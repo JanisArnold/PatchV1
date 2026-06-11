@@ -15,7 +15,7 @@ from patch.memory.store import SQLiteMemoryStore
 
 
 class KeywordEpisodicIndex:
-    """Token-overlap retrieval over the SQLite `episodes` table."""
+    """FTS5/BM25 retrieval over the SQLite `episodes` table."""
 
     def __init__(self, store: SQLiteMemoryStore) -> None:
         self._store = store

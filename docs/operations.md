@@ -5,6 +5,7 @@
 Default local runtime files include:
 
 - `data/patch.db` (plus `patch.db-wal` and `patch.db-shm` — SQLite runs in WAL mode)
+- `data/perf.jsonl` (append-only performance log, one JSON line per event)
 - `data/lancedb/` when the LanceDB episodic backend is active
 - `data/voice_loop_input.wav`
 - `data/voice_loop_tts/` (per-sentence TTS WAVs)
@@ -41,30 +42,25 @@ Debug mode prints the memory bundle, turn plan, timings, and state transitions.
 
 ## Performance logging
 
-PATCH stores per-stage performance information in SQLite.
+PATCH appends performance records to `data/perf.jsonl` — one JSON line per event, never SQLite writes on the hot path. Record kinds (`phase` field):
 
-Common logged phases now include:
-
-- `input.capture`
-- `turn.classification`
-- `memory.retrieval`
-- `prompt.assembly`
-- `llm.first_token` (streaming only — the perceived-latency number)
-- `llm.generate`
-- `turn.total`
-- `background.enqueue`
-- `background.memory.fact_extraction`
-- `background.memory.episodic_index`
-- `background.memory.summary`
-- `display.state_update`
-- Pi voice-loop phases when used
+- `turn`: one record per chat turn with all stage timings in one place:
+  `classification_ms`, `retrieval_ms`, `prompt_build_ms`, `llm_ms`,
+  `first_token_ms` (streaming only — the perceived-latency number), `total_ms`,
+  plus token estimates, profile, model, and turn type
+- `memory_task`: background worker timings (`episodic_ms`, `distill_ms`, `facts_extracted`)
+- `benchmark`: one record per benchmark prompt/profile pair
+- `system_snapshot`: Pi health captured by `/system` and after `/benchmark`
+- voice-loop phases (`audio.capture`, `stt.*`, `tts.first_audio`, `audio.playback_total`, `turn.voice_roundtrip`)
 
 Use:
 
 ```text
-/perf
+/perf      (last 20 records)
 /system
 ```
+
+The file is append-only and local-only; delete or truncate it whenever it grows annoying — nothing depends on its history.
 
 ## Common issues
 
@@ -86,7 +82,7 @@ Fix:
 Explanation:
 
 - For `llama.cpp`, PATCH forwards the toggle as `chat_template_kwargs.enable_thinking`; models without a thinking channel simply ignore it.
-- `/reasoning auto` is the recommended setting: thinking off for chat, on for complex turns.
+- If the model keeps producing thinking tokens despite `think: false` (check `response_tokens` in `/perf` vs the visible reply length), disable thinking at the server instead: start `llama-server` with `--jinja --reasoning-budget 0`.
 
 ### Episodic memory returns nothing
 
@@ -97,9 +93,11 @@ Explanation:
 
 ### Slow Pi replies
 
-Check:
+Check, in order of likely impact:
 
-- `/perf` for `llm.first_token` and `llm.generate` vs total turn time
+- `response_tokens` in `/perf` vs the reply you actually saw — a large gap means hidden thinking tokens; force them off (see above)
+- whether `llama-server` runs with `--parallel 1` so background distillation queues instead of halving generation speed
+- `first_token_ms` and `llm_ms` vs `total_ms` in `/perf`
 - `/system` for temperature and throttling
 - whether `fast` mode is active and streaming is on
 - whether `max_tokens` and a concise system prompt are capping reply length

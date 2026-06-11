@@ -5,12 +5,12 @@
 PATCH now has:
 
 - CLI chat with token streaming
-- three-tier memory: rolling context, episodic retrieval (keyword backend), durable SQLite facts
-- background fact extraction, episodic indexing, and summaries
+- three-tier memory: rolling context, episodic retrieval (SQLite FTS5/BM25), durable facts
+- background memory distillation (one LLM call for summary + facts) gated to idle time
 - `llama.cpp` provider with prompt caching, reply caps, and thinking control
-- per-turn auto thinking (off for chat, on for complex turns)
-- runtime modes, performance logging (incl. first-token latency), Pi system snapshots
-- a standalone Pi voice-loop harness with sentence-streamed TTS (whisper.cpp or Vosk)
+- thinking off by default (`/reasoning on|off` per session)
+- runtime modes, JSONL performance logging (incl. first-token latency), Pi system snapshots
+- a standalone Pi voice-loop harness with push-to-talk recording and sentence-streamed TTS (whisper.cpp or Vosk)
 
 Still to add:
 
@@ -25,7 +25,7 @@ Still to add:
 
 1. keep `llama-server` external and manually managed
 2. run `gemma-4-e2b-it-qat-q4_0` until `fast` mode is acceptable (~2-4 tok/s on Pi 4 is expected)
-3. compare `llm.first_token` and `llm.generate` vs `turn.total`
+3. compare `first_token_ms` and `llm_ms` vs `total_ms` in `/perf`
 4. confirm background memory work is not hurting the hot path
 
 ## Phase 2: Validate the voice loop

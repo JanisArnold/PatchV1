@@ -104,8 +104,8 @@ def load_config() -> AppConfig:
         llama_cpp_external_server=bool(
             raw["providers"].get("llama_cpp", {}).get("external_server", True)
         ),
-        ollama_base_url=raw["providers"]["ollama"]["base_url"],
-        ollama_timeout_seconds=int(raw["providers"]["ollama"]["timeout_seconds"]),
+        ollama_base_url=raw["providers"].get("ollama", {}).get("base_url", "http://127.0.0.1:11434"),
+        ollama_timeout_seconds=int(raw["providers"].get("ollama", {}).get("timeout_seconds", 120)),
         audio_input_device=str(raw.get("audio", {}).get("input_device", "default")),
         audio_output_device=str(raw.get("audio", {}).get("output_device", "default")),
         voice_record_seconds=int(raw.get("audio", {}).get("record_seconds", 5)),

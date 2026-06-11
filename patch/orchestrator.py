@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 
 from patch.adapters.display import NoOpDisplayAdapter
@@ -12,6 +14,7 @@ from patch.brain import Brain, render_debug_info
 from patch.config import AppConfig
 from patch.contracts import DisplayAdapter, ModelProfile, VisionAdapter
 from patch.memory.store import SQLiteMemoryStore
+from patch.perf import PerfLogger
 from patch.streaming import SentenceAssembler
 from patch.system_metrics import collect_system_snapshot, render_system_snapshot
 
@@ -26,6 +29,8 @@ class Orchestrator:
         input_adapter: TextInputAdapter,
         output_adapter: TextOutputAdapter,
         background_worker: MemoryMaintenanceWorker,
+        perf_logger: PerfLogger | None = None,
+        idle_event: threading.Event | None = None,
         display_adapter: DisplayAdapter | None = None,
         vision_adapter: VisionAdapter | None = None,
     ) -> None:
@@ -37,6 +42,9 @@ class Orchestrator:
         self.display_adapter = display_adapter or NoOpDisplayAdapter()
         self.vision_adapter = vision_adapter or NoOpVisionAdapter()
         self.background_worker = background_worker
+        self.perf_logger = perf_logger or PerfLogger(config.data_dir / "perf.jsonl")
+        self.idle_event = idle_event or threading.Event()
+        self.idle_event.set()
         self.debug_enabled = config.debug
         self.active_profile = self._default_profile()
         self.runtime_mode = config.runtime_mode
@@ -76,15 +84,13 @@ class Orchestrator:
 
         When streaming is enabled, tokens flow to the output adapter as they
         generate, or to ``on_sentence`` sentence-by-sentence (the TTS path).
+
+        While generating, ``idle_event`` is cleared so the background worker
+        holds its LLM work instead of competing for the llama-server.
         """
         turn_started = time.perf_counter()
-        self._emit_state("listening")
-        self._record_performance(
-            phase="input.capture",
-            latency_ms=int((time.perf_counter() - turn_started) * 1000),
-            metadata={"mode": "text", "runtime_mode": self.runtime_mode},
-        )
         self._emit_state("thinking")
+        self.idle_event.clear()
 
         streaming = self.config.stream_responses
         assembler = SentenceAssembler() if streaming else None
@@ -116,6 +122,7 @@ class Orchestrator:
             self._emit_state("error")
             self.output_adapter.emit(f"Model error: {exc}")
             self._emit_state("idle")
+            self.idle_event.set()
             return None
 
         if stream_state["started"]:
@@ -132,32 +139,34 @@ class Orchestrator:
             else:
                 self.output_adapter.emit(reply)
 
-        user_turn_id = self.memory_store.save_turn(self.session_id, "user", user_text)
-        self.memory_store.save_turn(self.session_id, "assistant", reply)
-        memory_task = self.brain.create_memory_task(
-            session_id=self.session_id,
-            user_turn_id=user_turn_id,
-            user_text=user_text,
-            assistant_text=reply,
-            active_profile=self.active_profile,
-        )
-        enqueue_started = time.perf_counter()
-        self.background_worker.submit(memory_task)
-        background_enqueue_ms = int((time.perf_counter() - enqueue_started) * 1000)
-        self._record_performance(
-            phase="background.enqueue",
-            latency_ms=background_enqueue_ms,
-            metadata={"profile": self.active_profile.name},
-        )
-        if stream_state["first_token_ms"] is not None:
-            self._record_performance(
-                phase="llm.first_token",
-                latency_ms=stream_state["first_token_ms"],
-                metadata={"profile": self.active_profile.name},
+        user_turn_id = self.memory_store.save_turn_pair(self.session_id, user_text, reply)
+        self.idle_event.set()
+        self.background_worker.submit(
+            self.brain.create_memory_task(
+                session_id=self.session_id,
+                user_turn_id=user_turn_id,
+                user_text=user_text,
+                assistant_text=reply,
+                active_profile=self.active_profile,
             )
-        turn_total_ms = int((time.perf_counter() - turn_started) * 1000)
-        self._record_core_timings(debug_info, turn_total_ms)
-        self._record_system_snapshot(source="turn")
+        )
+        self.perf_logger.log(
+            {
+                "phase": "turn",
+                "profile": self.active_profile.name,
+                "model": self.active_profile.model,
+                "runtime_mode": self.runtime_mode,
+                "turn_type": debug_info.get("turn_type"),
+                "classification_ms": debug_info.get("classification_ms"),
+                "retrieval_ms": debug_info.get("retrieval_ms"),
+                "prompt_build_ms": debug_info.get("prompt_build_ms"),
+                "llm_ms": debug_info.get("latency_ms"),
+                "first_token_ms": stream_state["first_token_ms"],
+                "total_ms": int((time.perf_counter() - turn_started) * 1000),
+                "prompt_tokens": debug_info.get("prompt_tokens_estimate"),
+                "response_tokens": debug_info.get("response_tokens_estimate"),
+            }
+        )
         if self.debug_enabled:
             self.output_adapter.emit(render_debug_info(debug_info))
         self._emit_state("idle")
@@ -183,10 +192,7 @@ class Orchestrator:
         if command == "/use":
             self._switch_profile(argument)
             return False
-        if command == "/reasoning":
-            self._toggle_reasoning(argument)
-            return False
-        if command == "/think":
+        if command in {"/reasoning", "/think"}:
             self._toggle_reasoning(argument)
             return False
         if command == "/memory":
@@ -202,7 +208,7 @@ class Orchestrator:
             self.output_adapter.emit(json.dumps(summaries, indent=2, ensure_ascii=True))
             return False
         if command == "/perf":
-            self._show_performance()
+            self.output_adapter.emit(json.dumps(self.perf_logger.tail(20), indent=2, ensure_ascii=True))
             return False
         if command == "/system":
             self._show_system()
@@ -214,8 +220,8 @@ class Orchestrator:
             self._toggle_streaming(argument)
             return False
         if command == "/episodes":
-            episodes = self.memory_store.search_episodes(argument, limit=5) if argument else []
             if argument:
+                episodes = self.memory_store.search_episodes(argument, limit=5)
                 payload = [
                     {"user": ep.user_text, "assistant": ep.assistant_text, "at": ep.created_at, "score": ep.score}
                     for ep in episodes
@@ -252,7 +258,7 @@ class Orchestrator:
         if ok:
             lines.append(f"Available {self.active_profile.provider} models:")
             for model_name in provider.list_models():
-                lines.append(f"- {model_name}: {provider.estimate_capabilities(model_name)}")
+                lines.append(f"- {model_name}")
         self.output_adapter.emit("\n".join(lines))
 
     def _show_help(self) -> None:
@@ -262,14 +268,13 @@ class Orchestrator:
             "/models - List configured profiles and provider-visible models.",
             "/mode [fast|balanced|vision_test] - Show or switch the runtime mode.",
             "/use <profile-or-model> - Switch the active model/profile.",
-            "/reasoning on|off|auto - Toggle thinking mode (auto = on only for complex turns).",
-            "/think on|off|auto - Alias for /reasoning.",
+            "/reasoning on|off - Toggle thinking mode for this session (alias: /think).",
             "/stream on|off - Toggle token streaming output.",
             "/memory - Show recent stored conversation rows.",
             "/facts - Show extracted durable facts.",
             "/episodes <query> - Search episodic memory.",
             "/summary - Show recent rolling summaries.",
-            "/perf - Show recent performance logs and system snapshots.",
+            "/perf - Show recent per-turn performance records.",
             "/system - Capture and print a fresh system snapshot.",
             "/debug on|off - Enable or disable debug output.",
             "/benchmark - Run benchmark prompts across configured profiles.",
@@ -277,25 +282,9 @@ class Orchestrator:
         ]
         self.output_adapter.emit("\n".join(lines))
 
-    def _show_performance(self) -> None:
-        logs = self.memory_store.get_recent_performance_logs()
-        snapshots = self.memory_store.get_recent_system_snapshots(limit=5)
-        payload = {
-            "performance_logs": logs,
-            "system_snapshots": snapshots,
-        }
-        self.output_adapter.emit(json.dumps(payload, indent=2, ensure_ascii=True))
-
     def _show_system(self) -> None:
         snapshot = collect_system_snapshot()
-        self.memory_store.record_system_snapshot(
-            session_id=self.session_id,
-            source="manual",
-            temperature_c=snapshot.get("temperature_c"),
-            throttled_hex=snapshot.get("throttled_hex"),
-            arm_clock_hz=snapshot.get("arm_clock_hz"),
-            metadata_json=json.dumps(snapshot),
-        )
+        self.perf_logger.log({"phase": "system_snapshot", "source": "manual", **snapshot})
         self.output_adapter.emit(render_system_snapshot(snapshot))
 
     def _switch_profile(self, argument: str) -> None:
@@ -340,32 +329,22 @@ class Orchestrator:
         self.output_adapter.emit(f"Debug mode {'enabled' if self.debug_enabled else 'disabled'}.")
 
     def _toggle_reasoning(self, argument: str) -> None:
-        provider = self.brain.provider_registry[self.active_profile.provider]
-        if not provider.supports_reasoning_toggle(self.active_profile):
-            self.output_adapter.emit(
-                f"Reasoning toggle is not supported by provider {self.active_profile.provider}."
-            )
-            return
         value = argument.lower()
         if value in {"off", "false", "0", "nothink"}:
-            self.active_profile.options["think"] = False
-            self.output_adapter.emit(
-                f"Reasoning disabled for {self.active_profile.name} ({self.active_profile.model})."
-            )
+            think = False
+        elif value in {"on", "true", "1", "think"}:
+            think = True
+        else:
+            self.output_adapter.emit("Usage: /reasoning on|off")
             return
-        if value in {"on", "true", "1", "think"}:
-            self.active_profile.options["think"] = True
-            self.output_adapter.emit(
-                f"Reasoning enabled for {self.active_profile.name} ({self.active_profile.model})."
-            )
-            return
-        if value == "auto":
-            self.active_profile.options["think"] = "auto"
-            self.output_adapter.emit(
-                f"Reasoning set to auto for {self.active_profile.name}: on for complex turns, off for chat."
-            )
-            return
-        self.output_adapter.emit("Usage: /reasoning on|off|auto")
+        # Work on a copy so the session toggle never mutates the shared
+        # profile object from config; /use <profile> restores the configured value.
+        options = dict(self.active_profile.options)
+        options["think"] = think
+        self.active_profile = replace(self.active_profile, options=options)
+        self.output_adapter.emit(
+            f"Reasoning {'enabled' if think else 'disabled'} for {self.active_profile.name} ({self.active_profile.model})."
+        )
 
     def _toggle_streaming(self, argument: str) -> None:
         value = argument.lower()
@@ -388,65 +367,22 @@ class Orchestrator:
             except RuntimeError as exc:
                 self.output_adapter.emit(f"Benchmark failed for {profile.name}: {exc}")
                 continue
+            for result in results:
+                record = {key: value for key, value in result.items() if key != "reply"}
+                self.perf_logger.log({"phase": "benchmark", **record})
             avg_latency = int(sum(item["latency_ms"] for item in results) / max(1, len(results)))
             self.output_adapter.emit(
                 f"- {profile.name} ({profile.model}) completed {len(results)} prompt(s), avg latency {avg_latency} ms."
             )
-        self._record_system_snapshot(source="benchmark")
+        snapshot = collect_system_snapshot()
+        self.perf_logger.log({"phase": "system_snapshot", "source": "benchmark", **snapshot})
 
     def _default_profile(self) -> ModelProfile:
         if self.config.default_profile in self.config.model_profiles:
             return self.config.model_profiles[self.config.default_profile]
         return next(iter(self.config.model_profiles.values()))
 
-    def _record_system_snapshot(self, source: str) -> None:
-        snapshot = collect_system_snapshot()
-        self.memory_store.record_system_snapshot(
-            session_id=self.session_id,
-            source=source,
-            temperature_c=snapshot.get("temperature_c"),
-            throttled_hex=snapshot.get("throttled_hex"),
-            arm_clock_hz=snapshot.get("arm_clock_hz"),
-            metadata_json=json.dumps(snapshot),
-        )
-
-    def _record_performance(self, *, phase: str, latency_ms: int, metadata: dict[str, object]) -> None:
-        self.memory_store.record_performance_log(
-            session_id=self.session_id,
-            phase=phase,
-            latency_ms=latency_ms,
-            metadata_json=json.dumps(metadata),
-        )
-
-    def _record_core_timings(self, debug_info: dict[str, object], turn_total_ms: int) -> None:
-        phase_map = {
-            "turn.classification": debug_info.get("classification_ms"),
-            "memory.retrieval": debug_info.get("retrieval_ms"),
-            "prompt.assembly": debug_info.get("prompt_build_ms"),
-            "llm.generate": debug_info.get("latency_ms"),
-            "turn.total": turn_total_ms,
-        }
-        base_metadata = {
-            "profile": self.active_profile.name,
-            "model": self.active_profile.model,
-            "runtime_mode": self.runtime_mode,
-            "turn_type": debug_info.get("turn_type"),
-        }
-        for phase, latency_ms in phase_map.items():
-            self._record_performance(
-                phase=phase,
-                latency_ms=int(latency_ms or 0),
-                metadata=base_metadata,
-            )
-
     def _emit_state(self, state: str) -> None:
-        started = time.perf_counter()
         self.display_adapter.on_state_change(state)
-        display_ms = int((time.perf_counter() - started) * 1000)
-        self._record_performance(
-            phase="display.state_update",
-            latency_ms=display_ms,
-            metadata={"state": state, "display_enabled": self.config.display_enabled},
-        )
         if self.debug_enabled:
             self.output_adapter.emit(f"[state] {state}")

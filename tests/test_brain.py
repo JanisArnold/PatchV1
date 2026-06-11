@@ -2,7 +2,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from patch.brain import Brain, RuleBasedFactExtractor
+from patch.brain import Brain, MemoryDistiller
 from patch.config import AppConfig
 from patch.contracts import MemoryFact, ModelProfile, ProviderResponse
 from patch.memory.episodic import KeywordEpisodicIndex
@@ -10,9 +10,14 @@ from patch.memory.store import SQLiteMemoryStore
 
 
 class FakeProvider:
+    def __init__(self, reply_text: str = "Test reply") -> None:
+        self.reply_text = reply_text
+        self.captured_profiles = []
+
     def generate_reply(self, messages, model_profile):
+        self.captured_profiles.append(model_profile)
         return ProviderResponse(
-            text="Test reply",
+            text=self.reply_text,
             prompt_tokens_estimate=12,
             response_tokens_estimate=2,
             raw={"messages": len(messages), "model": model_profile.model},
@@ -23,12 +28,6 @@ class FakeProvider:
 
     def list_models(self):
         return ["fake-model"]
-
-    def estimate_capabilities(self, model_name):
-        return "fake"
-
-    def supports_reasoning_toggle(self, model_profile):
-        return False
 
 
 def build_config(tmp_path: Path) -> AppConfig:
@@ -74,14 +73,33 @@ def build_config(tmp_path: Path) -> AppConfig:
     )
 
 
-class BrainTests(unittest.TestCase):
-    def test_rule_based_fact_extractor(self) -> None:
-        facts = RuleBasedFactExtractor().extract("My name is Janis and I like coffee.", "")
-        predicates = {fact.predicate for fact in facts}
-        self.assertIn("name", predicates)
-        self.assertIn("likes", predicates)
+class MemoryDistillerTests(unittest.TestCase):
+    def test_parses_summary_and_fact_lines(self) -> None:
+        text = (
+            "User is Janis, likes coffee, planning a Pi build.\n"
+            "FACT: user | name | Janis\n"
+            "FACT: user | likes | coffee\n"
+            "FACT: malformed line without pipes\n"
+        )
+        summary, facts = MemoryDistiller()._parse(text)
+        self.assertEqual(summary, "User is Janis, likes coffee, planning a Pi build.")
+        self.assertEqual(len(facts), 2)
+        self.assertEqual(facts[0].predicate, "name")
+        self.assertEqual(facts[1].value, "coffee")
 
-    def test_brain_generates_reply_and_updates_summary(self) -> None:
+    def test_fallback_without_provider_returns_no_facts(self) -> None:
+        from patch.contracts import ChatMessage
+
+        summary, facts = MemoryDistiller().distill(
+            [ChatMessage(role="user", content="hello")],
+            previous_summary="Old summary.",
+        )
+        self.assertIn("Old summary.", summary)
+        self.assertEqual(facts, [])
+
+
+class BrainTests(unittest.TestCase):
+    def test_brain_generates_reply(self) -> None:
         with TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             config = build_config(tmp_path)
@@ -93,7 +111,7 @@ class BrainTests(unittest.TestCase):
                 persona="You are PATCH.",
             )
             session_id = store.create_session()
-            user_turn_id = store.save_turn(session_id, "user", "My name is Janis")
+            store.save_turn(session_id, "user", "My name is Janis")
             store.save_turn(session_id, "assistant", "Hello Janis")
 
             reply, debug_info = brain.generate_reply("I like coffee", config.model_profiles["default"], "fast")
@@ -103,6 +121,27 @@ class BrainTests(unittest.TestCase):
             self.assertIn("retrieval_ms", debug_info)
             self.assertIn("prompt_build_ms", debug_info)
             self.assertIn("total_ms", debug_info)
+            # memory_bundle export is debug-only.
+            self.assertNotIn("memory_bundle", debug_info)
+            store.close()
+
+    def test_memory_task_distills_summary_and_facts(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            config = build_config(tmp_path)
+            store = SQLiteMemoryStore(tmp_path / "patch.db")
+            provider = FakeProvider(
+                reply_text="Janis likes coffee.\nFACT: user | likes | coffee"
+            )
+            brain = Brain(
+                config=config,
+                memory_store=store,
+                provider_registry={"llama_cpp": provider},
+                persona="You are PATCH.",
+            )
+            session_id = store.create_session()
+            user_turn_id = store.save_turn(session_id, "user", "I like coffee")
+            store.save_turn(session_id, "assistant", "Nice")
 
             task = brain.create_memory_task(
                 session_id=session_id,
@@ -111,71 +150,46 @@ class BrainTests(unittest.TestCase):
                 assistant_text="Nice",
                 active_profile=config.model_profiles["default"],
             )
-            brain.process_memory_task(task)
-            self.assertIsNotNone(store.get_latest_summary())
+            timings = brain.process_memory_task(task)
+            self.assertEqual(store.get_latest_summary(), "Janis likes coffee.")
             self.assertTrue(any(fact["predicate"] == "likes" for fact in store.get_facts()))
+            self.assertEqual(timings["facts_extracted"], 1)
+            self.assertIsNotNone(timings["distill_ms"])
             store.close()
 
-    def test_benchmark_profile_records_runs_without_reply_column(self) -> None:
+    def test_memory_task_skips_distill_below_window(self) -> None:
         with TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             config = build_config(tmp_path)
             store = SQLiteMemoryStore(tmp_path / "patch.db")
+            provider = FakeProvider()
             brain = Brain(
                 config=config,
                 memory_store=store,
-                provider_registry={"llama_cpp": FakeProvider()},
-                persona="You are PATCH.",
-            )
-
-            results = brain.benchmark_profile(
-                config.model_profiles["default"],
-                [{"name": "smoke", "prompt": "Say hello."}],
-            )
-
-            self.assertEqual(len(results), 1)
-            self.assertEqual(results[0]["reply"], "Test reply")
-            rows = store.connection.execute(
-                "SELECT profile_name, model_name, prompt_name FROM model_runs"
-            ).fetchall()
-            self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["prompt_name"], "smoke")
-            store.close()
-
-    def test_memory_update_records_background_performance_logs(self) -> None:
-        with TemporaryDirectory() as tmp_dir:
-            tmp_path = Path(tmp_dir)
-            config = build_config(tmp_path)
-            store = SQLiteMemoryStore(tmp_path / "patch.db")
-            brain = Brain(
-                config=config,
-                memory_store=store,
-                provider_registry={"llama_cpp": FakeProvider()},
+                provider_registry={"llama_cpp": provider},
                 persona="You are PATCH.",
             )
             session_id = store.create_session()
-            user_turn_id = store.save_turn(session_id, "user", "I like tea")
-            store.save_turn(session_id, "assistant", "Noted.")
+            user_turn_id = store.save_turn(session_id, "user", "hi")
 
             task = brain.create_memory_task(
                 session_id=session_id,
                 user_turn_id=user_turn_id,
-                user_text="I like tea",
-                assistant_text="Noted.",
+                user_text="hi",
+                assistant_text="hello",
                 active_profile=config.model_profiles["default"],
             )
-            brain.process_memory_task(task)
-
-            rows = store.get_recent_performance_logs()
-            phases = {row["phase"] for row in rows}
-            self.assertIn("background.memory.fact_extraction", phases)
-            self.assertIn("background.memory.summary", phases)
+            timings = brain.process_memory_task(task)
+            self.assertIsNone(timings["distill_ms"])
+            self.assertIsNone(store.get_latest_summary())
+            self.assertEqual(provider.captured_profiles, [])
             store.close()
 
     def test_episodic_memory_indexed_and_retrieved(self) -> None:
         with TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             config = build_config(tmp_path)
+            config.debug = True
             store = SQLiteMemoryStore(tmp_path / "patch.db")
             index = KeywordEpisodicIndex(store)
             brain = Brain(
@@ -209,39 +223,25 @@ class BrainTests(unittest.TestCase):
             self.assertTrue(debug_info["memory_bundle"]["episodes"])
             store.close()
 
-    def test_auto_thinking_resolves_per_turn(self) -> None:
+    def test_thinking_passes_through_profile_unchanged(self) -> None:
         with TemporaryDirectory() as tmp_dir:
             tmp_path = Path(tmp_dir)
             config = build_config(tmp_path)
             profile = config.model_profiles["default"]
-            profile.options["think"] = "auto"
+            profile.options["think"] = False
 
-            captured = {}
-
-            class CapturingProvider(FakeProvider):
-                def supports_reasoning_toggle(self, model_profile):
-                    return True
-
-                def generate_reply(self, messages, model_profile):
-                    captured["think"] = model_profile.options.get("think")
-                    return super().generate_reply(messages, model_profile)
-
+            provider = FakeProvider()
             store = SQLiteMemoryStore(tmp_path / "patch.db")
             brain = Brain(
                 config=config,
                 memory_store=store,
-                provider_registry={"llama_cpp": CapturingProvider()},
+                provider_registry={"llama_cpp": provider},
                 persona="You are PATCH.",
             )
 
             brain.generate_reply("hi there", profile, "fast")
-            self.assertFalse(captured["think"])
-
-            brain.generate_reply("compare these two architecture designs and analyze why", profile, "fast")
-            self.assertTrue(captured["think"])
-
-            # The stored profile itself must keep its "auto" marker.
-            self.assertEqual(profile.options["think"], "auto")
+            self.assertIs(provider.captured_profiles[0], profile)
+            self.assertFalse(provider.captured_profiles[0].options["think"])
             store.close()
 
     def test_fast_mode_omits_summary_and_facts_for_smalltalk(self) -> None:
@@ -264,8 +264,23 @@ class BrainTests(unittest.TestCase):
             self.assertEqual(debug_info["turn_type"], "smalltalk")
             self.assertFalse(debug_info["turn_plan"]["include_summary"])
             self.assertFalse(debug_info["turn_plan"]["include_facts"])
-            self.assertEqual(debug_info["memory_bundle"]["facts"], [])
-            self.assertIsNone(debug_info["memory_bundle"]["latest_summary"])
+            store.close()
+
+    def test_long_messages_classified_complex_get_retrieval(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            config = build_config(tmp_path)
+            store = SQLiteMemoryStore(tmp_path / "patch.db")
+            brain = Brain(
+                config=config,
+                memory_store=store,
+                provider_registry={"llama_cpp": FakeProvider()},
+                persona="You are PATCH.",
+            )
+            long_text = "could you help me figure out the best way to organize my week around training and work"
+            _, debug_info = brain.generate_reply(long_text, config.model_profiles["default"], "fast")
+            self.assertEqual(debug_info["turn_type"], "complex")
+            self.assertTrue(debug_info["turn_plan"]["include_summary"])
             store.close()
 
 

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import threading
+
 from patch.adapters import NoOpDisplayAdapter, NoOpVisionAdapter, TextInputAdapter, TextOutputAdapter
 from patch.background import MemoryMaintenanceWorker
 from patch.brain import Brain
 from patch.config import load_config
 from patch.memory import SQLiteMemoryStore
 from patch.memory.episodic import build_episodic_index
+from patch.perf import PerfLogger
 from patch.personality import load_persona
 from patch.providers import LlamaCppChatProvider, OllamaChatProvider
 from patch.orchestrator import Orchestrator
@@ -16,6 +19,10 @@ def build_app() -> Orchestrator:
     config.data_dir.mkdir(parents=True, exist_ok=True)
     memory_store = SQLiteMemoryStore(config.database_path)
     persona = load_persona()
+    perf_logger = PerfLogger(config.data_dir / "perf.jsonl")
+    # Set while no foreground turn is generating; gates background LLM work.
+    idle_event = threading.Event()
+    idle_event.set()
     providers = {
         "llama_cpp": LlamaCppChatProvider(
             base_url=config.llama_cpp_base_url,
@@ -44,6 +51,8 @@ def build_app() -> Orchestrator:
         config=config,
         provider_registry=providers,
         persona=persona,
+        idle_event=idle_event,
+        perf_logger=perf_logger,
     )
     return Orchestrator(
         config=config,
@@ -52,6 +61,8 @@ def build_app() -> Orchestrator:
         input_adapter=TextInputAdapter(),
         output_adapter=TextOutputAdapter(),
         background_worker=background_worker,
+        perf_logger=perf_logger,
+        idle_event=idle_event,
         display_adapter=NoOpDisplayAdapter(),
         vision_adapter=NoOpVisionAdapter(),
     )

@@ -21,6 +21,12 @@ def tokenize(text: str) -> List[str]:
     return [token for token in _TOKEN_PATTERN.findall(text.lower()) if token not in _STOPWORDS]
 
 
+def _fts_query(text: str) -> str:
+    """Build an OR-of-terms FTS5 query; quoting keeps user text from being
+    parsed as FTS syntax."""
+    return " OR ".join(f'"{token}"' for token in tokenize(text))
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
@@ -57,7 +63,6 @@ CREATE TABLE IF NOT EXISTS episodes (
     session_id INTEGER,
     user_text TEXT NOT NULL,
     assistant_text TEXT NOT NULL,
-    tokens TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (session_id) REFERENCES sessions(id)
 );
@@ -73,51 +78,45 @@ CREATE TABLE IF NOT EXISTS facts (
     UNIQUE(subject, predicate, value),
     FOREIGN KEY (source_turn_id) REFERENCES turns(id)
 );
-
-CREATE TABLE IF NOT EXISTS tasks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'open',
-    notes TEXT,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS model_runs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_type TEXT NOT NULL,
-    profile_name TEXT NOT NULL,
-    provider TEXT NOT NULL,
-    model_name TEXT NOT NULL,
-    prompt_name TEXT,
-    prompt_size INTEGER NOT NULL,
-    response_size INTEGER NOT NULL,
-    latency_ms INTEGER NOT NULL,
-    notes TEXT,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS performance_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id INTEGER,
-    phase TEXT NOT NULL,
-    latency_ms INTEGER NOT NULL,
-    metadata_json TEXT,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (session_id) REFERENCES sessions(id)
-);
-
-CREATE TABLE IF NOT EXISTS system_snapshots (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id INTEGER,
-    source TEXT NOT NULL,
-    temperature_c REAL,
-    throttled_hex TEXT,
-    arm_clock_hz INTEGER,
-    metadata_json TEXT,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (session_id) REFERENCES sessions(id)
-);
 """
+
+# External-content FTS5 indexes kept in sync by triggers. BM25 ranking
+# replaces the old load-everything-and-score-in-Python retrieval.
+FTS_SCHEMA = """
+CREATE VIRTUAL TABLE IF NOT EXISTS facts_fts USING fts5(
+    subject, predicate, value,
+    content='facts', content_rowid='id'
+);
+
+CREATE TRIGGER IF NOT EXISTS facts_fts_insert AFTER INSERT ON facts BEGIN
+    INSERT INTO facts_fts(rowid, subject, predicate, value)
+    VALUES (new.id, new.subject, new.predicate, new.value);
+END;
+
+CREATE TRIGGER IF NOT EXISTS facts_fts_delete AFTER DELETE ON facts BEGIN
+    INSERT INTO facts_fts(facts_fts, rowid, subject, predicate, value)
+    VALUES ('delete', old.id, old.subject, old.predicate, old.value);
+END;
+
+CREATE TRIGGER IF NOT EXISTS facts_fts_update AFTER UPDATE ON facts BEGIN
+    INSERT INTO facts_fts(facts_fts, rowid, subject, predicate, value)
+    VALUES ('delete', old.id, old.subject, old.predicate, old.value);
+    INSERT INTO facts_fts(rowid, subject, predicate, value)
+    VALUES (new.id, new.subject, new.predicate, new.value);
+END;
+
+CREATE VIRTUAL TABLE IF NOT EXISTS episodes_fts USING fts5(
+    user_text, assistant_text,
+    content='episodes', content_rowid='id'
+);
+
+CREATE TRIGGER IF NOT EXISTS episodes_fts_insert AFTER INSERT ON episodes BEGIN
+    INSERT INTO episodes_fts(rowid, user_text, assistant_text)
+    VALUES (new.id, new.user_text, new.assistant_text);
+END;
+"""
+
+SCHEMA_VERSION = 3
 
 
 class SQLiteMemoryStore:
@@ -130,6 +129,9 @@ class SQLiteMemoryStore:
         # separate connections without blocking each other.
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.execute("PRAGMA synchronous=NORMAL")
+        # Old DBs may keep a legacy NOT NULL episodes.tokens column that
+        # SQLite cannot drop; inserts then need to fill it.
+        self._episodes_need_tokens = False
         self._ensure_schema()
 
     def close(self) -> None:
@@ -137,22 +139,48 @@ class SQLiteMemoryStore:
 
     def _ensure_schema(self) -> None:
         self.connection.executescript(SCHEMA)
+        previous_version = self._read_schema_version()
         self._migrate_schema()
+        self.connection.executescript(FTS_SCHEMA)
+        if previous_version < SCHEMA_VERSION:
+            # Backfill the FTS indexes from pre-FTS rows.
+            self.connection.execute("INSERT INTO facts_fts(facts_fts) VALUES('rebuild')")
+            self.connection.execute("INSERT INTO episodes_fts(episodes_fts) VALUES('rebuild')")
         self.connection.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
-            ("schema_version", "2"),
+            ("schema_version", str(SCHEMA_VERSION)),
         )
         self.connection.commit()
 
+    def _read_schema_version(self) -> int:
+        row = self.connection.execute(
+            "SELECT value FROM meta WHERE key = 'schema_version'"
+        ).fetchone()
+        if row is None:
+            return SCHEMA_VERSION  # fresh database, no backfill needed
+        try:
+            return int(row["value"])
+        except ValueError:
+            return 0
+
     def _migrate_schema(self) -> None:
-        columns = {
+        summary_columns = {
             row["name"]
             for row in self.connection.execute("PRAGMA table_info(summaries)").fetchall()
         }
-        if "last_turn_id" not in columns:
+        if "last_turn_id" not in summary_columns:
             self.connection.execute(
                 "ALTER TABLE summaries ADD COLUMN last_turn_id INTEGER NOT NULL DEFAULT 0"
             )
+        episode_columns = {
+            row["name"]
+            for row in self.connection.execute("PRAGMA table_info(episodes)").fetchall()
+        }
+        if "tokens" in episode_columns:
+            try:
+                self.connection.execute("ALTER TABLE episodes DROP COLUMN tokens")
+            except sqlite3.OperationalError:
+                self._episodes_need_tokens = True
 
     def create_session(self) -> int:
         cursor = self.connection.execute("INSERT INTO sessions DEFAULT VALUES")
@@ -173,6 +201,20 @@ class SQLiteMemoryStore:
         )
         self.connection.commit()
         return int(cursor.lastrowid)
+
+    def save_turn_pair(self, session_id: int, user_text: str, assistant_text: str) -> int:
+        """Save a user/assistant exchange in one transaction; returns the user turn id."""
+        cursor = self.connection.execute(
+            "INSERT INTO turns(session_id, speaker, text) VALUES (?, 'user', ?)",
+            (session_id, user_text),
+        )
+        user_turn_id = int(cursor.lastrowid)
+        self.connection.execute(
+            "INSERT INTO turns(session_id, speaker, text) VALUES (?, 'assistant', ?)",
+            (session_id, assistant_text),
+        )
+        self.connection.commit()
+        return user_turn_id
 
     def get_recent_turns(self, limit: int) -> List[ChatMessage]:
         rows = self.connection.execute(
@@ -231,21 +273,20 @@ class SQLiteMemoryStore:
         self.connection.commit()
 
     def get_relevant_facts(self, query: str, limit: int) -> List[MemoryFact]:
+        match = _fts_query(query)
+        if not match:
+            return []
         rows = self.connection.execute(
             """
-            SELECT subject, predicate, value, confidence
-            FROM facts
-            ORDER BY updated_at DESC, confidence DESC
-            LIMIT 500
-            """
+            SELECT f.subject, f.predicate, f.value, f.confidence
+            FROM facts_fts
+            JOIN facts f ON f.id = facts_fts.rowid
+            WHERE facts_fts MATCH ?
+            ORDER BY bm25(facts_fts)
+            LIMIT ?
+            """,
+            (match, limit),
         ).fetchall()
-        query_tokens = set(tokenize(query))
-        scored: List[tuple] = []
-        for order, row in enumerate(rows):
-            fact_tokens = set(tokenize(f"{row['subject']} {row['predicate']} {row['value']}"))
-            overlap = len(query_tokens & fact_tokens)
-            scored.append((overlap, -order, row))
-        scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
         return [
             MemoryFact(
                 subject=row["subject"],
@@ -253,7 +294,7 @@ class SQLiteMemoryStore:
                 value=row["value"],
                 confidence=float(row["confidence"]),
             )
-            for _, _, row in scored[:limit]
+            for row in rows
         ]
 
     def build_memory_bundle(
@@ -313,113 +354,23 @@ class SQLiteMemoryStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
-    def record_model_run(
-        self,
-        *,
-        run_type: str,
-        profile_name: str,
-        provider: str,
-        model_name: str,
-        prompt_name: Optional[str],
-        prompt_size: int,
-        response_size: int,
-        latency_ms: int,
-        notes: Optional[str] = None,
-    ) -> None:
-        self.connection.execute(
-            """
-            INSERT INTO model_runs(
-                run_type, profile_name, provider, model_name, prompt_name,
-                prompt_size, response_size, latency_ms, notes
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                run_type,
-                profile_name,
-                provider,
-                model_name,
-                prompt_name,
-                prompt_size,
-                response_size,
-                latency_ms,
-                notes,
-            ),
-        )
-        self.connection.commit()
-
-    def record_performance_log(
-        self,
-        *,
-        session_id: Optional[int],
-        phase: str,
-        latency_ms: int,
-        metadata_json: Optional[str] = None,
-    ) -> None:
-        self.connection.execute(
-            """
-            INSERT INTO performance_logs(session_id, phase, latency_ms, metadata_json)
-            VALUES (?, ?, ?, ?)
-            """,
-            (session_id, phase, latency_ms, metadata_json),
-        )
-        self.connection.commit()
-
-    def record_system_snapshot(
-        self,
-        *,
-        session_id: Optional[int],
-        source: str,
-        temperature_c: Optional[float],
-        throttled_hex: Optional[str],
-        arm_clock_hz: Optional[int],
-        metadata_json: Optional[str] = None,
-    ) -> None:
-        self.connection.execute(
-            """
-            INSERT INTO system_snapshots(
-                session_id, source, temperature_c, throttled_hex, arm_clock_hz, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (session_id, source, temperature_c, throttled_hex, arm_clock_hz, metadata_json),
-        )
-        self.connection.commit()
-
-    def get_recent_performance_logs(self, limit: int = 20) -> List[Dict[str, object]]:
-        rows = self.connection.execute(
-            """
-            SELECT id, session_id, phase, latency_ms, metadata_json, created_at
-            FROM performance_logs
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-        return [dict(row) for row in rows]
-
-    def get_recent_system_snapshots(self, limit: int = 10) -> List[Dict[str, object]]:
-        rows = self.connection.execute(
-            """
-            SELECT id, session_id, source, temperature_c, throttled_hex, arm_clock_hz, metadata_json, created_at
-            FROM system_snapshots
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (limit,),
-        ).fetchall()
-        return [dict(row) for row in rows]
-
     def add_episode(self, *, session_id: int, user_text: str, assistant_text: str) -> int:
-        tokens = " ".join(sorted(set(tokenize(f"{user_text} {assistant_text}"))))
-        cursor = self.connection.execute(
-            "INSERT INTO episodes(session_id, user_text, assistant_text, tokens) VALUES (?, ?, ?, ?)",
-            (session_id, user_text, assistant_text, tokens),
-        )
+        if self._episodes_need_tokens:
+            cursor = self.connection.execute(
+                "INSERT INTO episodes(session_id, user_text, assistant_text, tokens) VALUES (?, ?, ?, '')",
+                (session_id, user_text, assistant_text),
+            )
+        else:
+            cursor = self.connection.execute(
+                "INSERT INTO episodes(session_id, user_text, assistant_text) VALUES (?, ?, ?)",
+                (session_id, user_text, assistant_text),
+            )
         self.connection.commit()
         return int(cursor.lastrowid)
 
     def search_episodes(self, query: str, limit: int, exclude_latest: int = 3) -> List[EpisodicMemory]:
-        query_tokens = set(tokenize(query))
-        if not query_tokens:
+        match = _fts_query(query)
+        if not match:
             return []
         max_id_row = self.connection.execute(
             "SELECT COALESCE(MAX(id), 0) AS max_id FROM episodes"
@@ -427,31 +378,27 @@ class SQLiteMemoryStore:
         cutoff_id = int(max_id_row["max_id"]) - exclude_latest
         rows = self.connection.execute(
             """
-            SELECT user_text, assistant_text, tokens, created_at
-            FROM episodes
-            WHERE id <= ?
-            ORDER BY id DESC
-            LIMIT 2000
+            SELECT e.user_text, e.assistant_text, e.created_at,
+                   bm25(episodes_fts) AS rank
+            FROM episodes_fts
+            JOIN episodes e ON e.id = episodes_fts.rowid
+            WHERE episodes_fts MATCH ? AND e.id <= ?
+            ORDER BY rank
+            LIMIT ?
             """,
-            (cutoff_id,),
+            (match, cutoff_id, limit),
         ).fetchall()
-        scored: List[EpisodicMemory] = []
-        for row in rows:
-            episode_tokens = set(row["tokens"].split())
-            overlap = len(query_tokens & episode_tokens)
-            if overlap == 0:
-                continue
-            score = overlap / float(len(query_tokens))
-            scored.append(
-                EpisodicMemory(
-                    user_text=row["user_text"],
-                    assistant_text=row["assistant_text"],
-                    created_at=row["created_at"],
-                    score=score,
-                )
+        # bm25() returns smaller-is-better (negative) ranks; flip the sign so
+        # callers get a familiar higher-is-better score.
+        return [
+            EpisodicMemory(
+                user_text=row["user_text"],
+                assistant_text=row["assistant_text"],
+                created_at=row["created_at"],
+                score=-float(row["rank"]),
             )
-        scored.sort(key=lambda episode: episode.score, reverse=True)
-        return scored[:limit]
+            for row in rows
+        ]
 
     def export_bundle_dict(self, bundle: MemoryBundle) -> Dict[str, object]:
         return {

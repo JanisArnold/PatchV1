@@ -33,7 +33,7 @@ def main() -> None:
     transcribe = _build_stt(config)
 
     try:
-        print("PATCH voice loop test. Press Enter to record one turn, or type /exit.")
+        print("PATCH voice loop test. Press Enter to start recording (Enter again to stop), or type /exit.")
         while True:
             command = input("> ").strip()
             if command.lower() == "/exit":
@@ -169,8 +169,14 @@ def _transcribe_vosk(KaldiRecognizer, model, audio_path: Path) -> str:
 
 
 def _record_audio(config, audio_path: Path) -> int:
+    """Record until the user presses Enter (push-to-talk style).
+
+    A fixed-length recording wastes the unused seconds twice: once waiting,
+    once transcribing silence. `voice_record_seconds` is kept as a hard cap.
+    arecord finalizes the WAV header cleanly on SIGTERM.
+    """
     started = time.perf_counter()
-    subprocess.run(
+    process = subprocess.Popen(
         [
             "arecord",
             "-D",
@@ -185,8 +191,11 @@ def _record_audio(config, audio_path: Path) -> int:
             "1",
             str(audio_path),
         ],
-        check=True,
     )
+    input("Recording... press Enter to stop. ")
+    if process.poll() is None:
+        process.terminate()
+    process.wait()
     return int((time.perf_counter() - started) * 1000)
 
 
@@ -212,12 +221,7 @@ def _synthesize_speech(config, text: str, tts_path: Path) -> int:
 
 
 def _record_perf(app, phase: str, latency_ms: int, metadata: dict[str, object]) -> None:
-    app.memory_store.record_performance_log(
-        session_id=app.session_id,
-        phase=phase,
-        latency_ms=latency_ms,
-        metadata_json=json.dumps(metadata),
-    )
+    app.perf_logger.log({"phase": phase, "latency_ms": latency_ms, **metadata})
 
 
 if __name__ == "__main__":

@@ -34,8 +34,8 @@ For fair model comparisons, use a fresh database for each model unless you are e
 - `/models`
 - `/mode [fast|balanced|vision_test]`
 - `/use <profile-or-model>`
-- `/reasoning on|off|auto` (auto = thinking only for complex turns)
-- `/think on|off|auto`
+- `/reasoning on|off` (session-only; `/use <profile>` restores the configured value)
+- `/think on|off` (alias)
 - `/stream on|off`
 - `/memory`
 - `/facts`
@@ -52,8 +52,9 @@ For fair model comparisons, use a fresh database for each model unless you are e
 - `fast` mode is the Pi-first default.
 - replies stream token-by-token; with a TTS sink they stream sentence-by-sentence.
 - episodic memory (past exchanges) is retrieved on memory-related and complex turns.
-- fact extraction, episodic indexing, and summary generation happen in the background.
-- `/perf` shows a detailed stage breakdown, including `llm.first_token`.
+- episodic indexing and summary/fact distillation happen in the background, gated to run only while no foreground turn is generating.
+- thinking is off by default; `/reasoning on` enables it for the session when a question needs it.
+- `/perf` shows the last 20 records from `data/perf.jsonl` — one compact record per turn with all stage timings.
 - provider-visible model lists come from the active provider, not specifically from Ollama.
 
 ## Recommended smoke test
@@ -85,17 +86,12 @@ What you want to see:
 - provider health is good
 - the active runtime mode is correct
 - the turn completes
-- `/perf` contains:
-  - `input.capture`
-  - `turn.classification`
-  - `memory.retrieval`
-  - `prompt.assembly`
-  - `llm.first_token` (when streaming)
-  - `llm.generate`
-  - `turn.total`
-  - `background.enqueue`
-  - `display.state_update`
-  - background memory phases later (`background.memory.fact_extraction`, `background.memory.episodic_index`, `background.memory.summary`)
+- `/perf` contains a `turn` record with:
+  - `classification_ms`, `retrieval_ms`, `prompt_build_ms`
+  - `first_token_ms` (when streaming — the perceived-latency number)
+  - `llm_ms` and `total_ms`
+  - `prompt_tokens` / `response_tokens` (a `response_tokens` count far above the visible reply means hidden thinking tokens — investigate)
+  - and, after a few turns, `memory_task` records from the background worker
 
 ## Runtime mode testing
 
@@ -140,7 +136,7 @@ Use when:
 
 ## Benchmark behavior
 
-`/benchmark` still runs a shared prompt set across configured profiles and stores results in `model_runs`.
+`/benchmark` runs a shared prompt set across configured profiles and appends one `benchmark` record per prompt/profile pair to `data/perf.jsonl`.
 
 Use it for:
 
@@ -160,12 +156,12 @@ python3 -m patch.voice_loop_test
 
 What it does:
 
-1. records one short WAV from the configured input device
+1. records from the configured input device until you press Enter (push-to-talk; `record_seconds` is the safety cap)
 2. transcribes with the configured `stt_engine` (whisper.cpp by default)
 3. sends the transcript through PATCH with sentence streaming
 4. synthesizes each completed sentence with Piper while the LLM keeps generating
 5. plays sentences in order
-6. records extra timing phases in SQLite
+6. records extra timing phases in `data/perf.jsonl`
 
 Additional voice-loop phases:
 

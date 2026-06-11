@@ -62,8 +62,6 @@ class TurnPlan:
     include_summary: bool
     include_facts: bool
     include_episodes: bool = False
-    # None = leave the profile setting alone; True/False = per-turn override.
-    think: Optional[bool] = None
 
 
 @dataclass
@@ -93,25 +91,9 @@ class ChatProvider(Protocol):
     def list_models(self) -> List[str]:
         ...
 
-    def estimate_capabilities(self, model_name: str) -> str:
-        ...
-
-    def supports_reasoning_toggle(self, model_profile: ModelProfile) -> bool:
-        ...
-
 
 class MemoryStore(Protocol):
     def create_session(self) -> int:
-        ...
-
-
-class FactExtractor(Protocol):
-    def extract(self, user_text: str, assistant_text: str) -> List[MemoryFact]:
-        ...
-
-
-class SummaryGenerator(Protocol):
-    def summarize(self, turns: List[ChatMessage], previous_summary: Optional[str] = None) -> str:
         ...
 
 
