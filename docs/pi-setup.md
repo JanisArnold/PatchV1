@@ -81,13 +81,20 @@ cmake --build build --config Release -j4
 
 `-DGGML_NATIVE=ON` enables the ARM NEON/dotprod paths for the Pi's CPU.
 
-Download the official QAT GGUF (`gemma-4-e2b-it-qat-q4_0-gguf` on Hugging Face — always the `-qat-` checkpoint, never a community PTQ quant of the base model; same RAM, meaningfully smarter). Unsloth's dynamic `UD-Q4_K_XL` GGUFs are worth comparing too.
+Download the official QAT GGUF (`google/gemma-4-E2B-it-qat-q4_0-gguf` on Hugging Face — always the `-qat-` checkpoint, never a community PTQ quant of the base model; same RAM, meaningfully smarter). Unsloth's dynamic `UD-Q4_K_XL` GGUFs are worth comparing too.
+
+```bash
+pip install -U "huggingface_hub[cli]"
+hf download google/gemma-4-E2B-it-qat-q4_0-gguf gemma-4-E2B_q4_0-it.gguf --cache-dir ~/models
+```
+
+Note the exact filename on the repo is `gemma-4-E2B_q4_0-it.gguf` (mixed case, underscore before `q4_0`). Without `--cache-dir`, the file lands under `~/.cache/huggingface/hub/models--google--gemma-4-E2B-it-qat-q4_0-gguf/snapshots/<hash>/` — copy or symlink it into `~/models/` for a stable path.
 
 Start the server with Pi-tuned flags:
 
 ```bash
 ~/llama.cpp/build/bin/llama-server \
-  -m ~/models/gemma-4-e2b-it-qat-q4_0.gguf \
+  -m ~/models/gemma-4-E2B_q4_0-it.gguf \
   --host 127.0.0.1 --port 8080 \
   -t 4 -tb 4 --prio 3 \
   -fa auto \
@@ -107,7 +114,7 @@ Gemma 4 ships a matching draft model (`gemma-4-e2b-it-qat-q4_0-unquantized-assis
 
 ```bash
 ~/llama.cpp/build/bin/llama-server \
-  -m ~/models/gemma-4-e2b-it-qat-q4_0.gguf \
+  -m ~/models/gemma-4-E2B_q4_0-it.gguf \
   -md ~/models/gemma-4-e2b-assistant.gguf \
   ... (same flags as above)
 ```
