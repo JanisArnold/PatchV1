@@ -3,10 +3,15 @@
 ## Prerequisites
 
 - Windows, Linux, or macOS
-- Python 3.9+
+- Python 3.9+ (3.12 recommended)
 - a running local inference server
 
-The current default path is `llama.cpp` via external `llama-server`.
+The current default path is `llama.cpp` via external `llama-server`. Replies stream token-by-token by default; toggle with `/stream on|off`.
+
+Optional extras (not needed for the core CLI):
+
+- `pip install lancedb sentence-transformers` for vector-based episodic memory (`memory.episodic_backend: "lancedb"`)
+- whisper.cpp / Piper / Vosk on the Pi for the voice loop (see [Pi Setup](pi-setup.md))
 
 ## 1. Install Python dependencies
 

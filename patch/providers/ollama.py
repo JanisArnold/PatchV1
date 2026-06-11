@@ -39,20 +39,29 @@ class OllamaChatProvider:
         return True
 
     def generate_reply(self, messages: List[ChatMessage], model_profile: ModelProfile) -> ProviderResponse:
+        # "think" and "max_tokens" are PATCH-level options, not Ollama runtime
+        # options; map or hoist them instead of passing them through.
+        extra_options = {
+            key: value for key, value in model_profile.options.items() if key not in {"think", "max_tokens"}
+        }
         request_options = {
             "temperature": model_profile.temperature,
             "top_p": model_profile.top_p,
             "num_ctx": model_profile.num_ctx,
-            **model_profile.options,
+            **extra_options,
         }
+        max_tokens = model_profile.options.get("max_tokens")
+        if max_tokens is not None:
+            request_options["num_predict"] = int(max_tokens)
         body = {
             "model": model_profile.model,
             "stream": False,
             "messages": [{"role": m.role, "content": m.content} for m in messages],
             "options": request_options,
         }
-        if "think" in request_options:
-            body["think"] = bool(request_options["think"])
+        think = model_profile.options.get("think")
+        if isinstance(think, bool):
+            body["think"] = think
         payload = self._request_json("POST", "/api/chat", body)
         message = payload.get("message", {})
         text = str(message.get("content", "")).strip()

@@ -34,10 +34,12 @@ For fair model comparisons, use a fresh database for each model unless you are e
 - `/models`
 - `/mode [fast|balanced|vision_test]`
 - `/use <profile-or-model>`
-- `/reasoning on|off`
-- `/think on|off`
+- `/reasoning on|off|auto` (auto = thinking only for complex turns)
+- `/think on|off|auto`
+- `/stream on|off`
 - `/memory`
 - `/facts`
+- `/episodes <query>`
 - `/summary`
 - `/perf`
 - `/system`
@@ -47,9 +49,11 @@ For fair model comparisons, use a fresh database for each model unless you are e
 
 ## What changed in the new runtime
 
-- `fast` mode is now the Pi-first default.
-- memory fact extraction and summary generation happen in the background.
-- `/perf` now shows a more detailed stage breakdown.
+- `fast` mode is the Pi-first default.
+- replies stream token-by-token; with a TTS sink they stream sentence-by-sentence.
+- episodic memory (past exchanges) is retrieved on memory-related and complex turns.
+- fact extraction, episodic indexing, and summary generation happen in the background.
+- `/perf` shows a detailed stage breakdown, including `llm.first_token`.
 - provider-visible model lists come from the active provider, not specifically from Ollama.
 
 ## Recommended smoke test
@@ -86,11 +90,12 @@ What you want to see:
   - `turn.classification`
   - `memory.retrieval`
   - `prompt.assembly`
+  - `llm.first_token` (when streaming)
   - `llm.generate`
   - `turn.total`
   - `background.enqueue`
   - `display.state_update`
-  - background memory phases later
+  - background memory phases later (`background.memory.fact_extraction`, `background.memory.episodic_index`, `background.memory.summary`)
 
 ## Runtime mode testing
 
@@ -147,7 +152,7 @@ Do not use it as the only decision tool for PATCH personality or companion quali
 
 ## Pi voice-loop test
 
-After Vosk and Piper are installed on the Pi:
+After whisper.cpp (or Vosk) and Piper are installed on the Pi:
 
 ```bash
 python3 -m patch.voice_loop_test
@@ -156,18 +161,17 @@ python3 -m patch.voice_loop_test
 What it does:
 
 1. records one short WAV from the configured input device
-2. transcribes with Vosk
-3. sends the transcript through PATCH
-4. synthesizes the reply with Piper
-5. plays the reply
+2. transcribes with the configured `stt_engine` (whisper.cpp by default)
+3. sends the transcript through PATCH with sentence streaming
+4. synthesizes each completed sentence with Piper while the LLM keeps generating
+5. plays sentences in order
 6. records extra timing phases in SQLite
 
 Additional voice-loop phases:
 
 - `audio.capture`
-- `stt.vosk`
-- `tts.piper`
-- `audio.playback_start`
+- `stt.whisper_cpp` or `stt.vosk`
+- `tts.first_audio` (time until PATCH starts speaking — the number that matters most)
 - `audio.playback_total`
 - `turn.voice_roundtrip`
 

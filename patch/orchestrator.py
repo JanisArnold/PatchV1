@@ -12,6 +12,7 @@ from patch.brain import Brain, render_debug_info
 from patch.config import AppConfig
 from patch.contracts import DisplayAdapter, ModelProfile, VisionAdapter
 from patch.memory.store import SQLiteMemoryStore
+from patch.streaming import SentenceAssembler
 from patch.system_metrics import collect_system_snapshot, render_system_snapshot
 
 
@@ -60,10 +61,8 @@ class Orchestrator:
                     break
                 continue
 
-            reply = self.handle_text_turn(user_text)
-            if reply is None:
-                continue
-            self.output_adapter.emit(reply)
+            # handle_text_turn emits the reply itself (streamed or whole).
+            self.handle_text_turn(user_text)
 
         self.memory_store.end_session(self.session_id)
 
@@ -71,24 +70,69 @@ class Orchestrator:
         self.background_worker.close()
         self.memory_store.close()
 
-    def handle_text_turn(self, user_text: str) -> str | None:
+    def handle_text_turn(self, user_text: str, on_sentence=None) -> str | None:
+        """Run one turn. The user turn is saved only after generation so the
+        current message does not also appear in retrieved recent turns.
+
+        When streaming is enabled, tokens flow to the output adapter as they
+        generate, or to ``on_sentence`` sentence-by-sentence (the TTS path).
+        """
         turn_started = time.perf_counter()
         self._emit_state("listening")
-        input_latency_ms = int((time.perf_counter() - turn_started) * 1000)
-        user_turn_id = self.memory_store.save_turn(self.session_id, "user", user_text)
         self._record_performance(
             phase="input.capture",
-            latency_ms=input_latency_ms,
+            latency_ms=int((time.perf_counter() - turn_started) * 1000),
             metadata={"mode": "text", "runtime_mode": self.runtime_mode},
         )
+        self._emit_state("thinking")
+
+        streaming = self.config.stream_responses
+        assembler = SentenceAssembler() if streaming else None
+        stream_state = {"started": False, "first_token_ms": None}
+
+        def handle_token(token: str) -> None:
+            if not stream_state["started"]:
+                stream_state["started"] = True
+                stream_state["first_token_ms"] = int((time.perf_counter() - turn_started) * 1000)
+                self._emit_state("speaking")
+                if on_sentence is None:
+                    self.output_adapter.begin_stream()
+            if on_sentence is not None:
+                for sentence in assembler.feed(token):
+                    on_sentence(sentence)
+            else:
+                self.output_adapter.emit_token(token)
+
         try:
-            self._emit_state("thinking")
-            reply, debug_info = self.brain.generate_reply(user_text, self.active_profile, self.runtime_mode)
+            reply, debug_info = self.brain.generate_reply(
+                user_text,
+                self.active_profile,
+                self.runtime_mode,
+                on_token=handle_token if streaming else None,
+            )
         except RuntimeError as exc:
+            if stream_state["started"] and on_sentence is None:
+                self.output_adapter.end_stream()
             self._emit_state("error")
             self.output_adapter.emit(f"Model error: {exc}")
+            self._emit_state("idle")
             return None
 
+        if stream_state["started"]:
+            if on_sentence is None:
+                self.output_adapter.end_stream()
+            else:
+                for sentence in assembler.flush():
+                    on_sentence(sentence)
+        else:
+            # Provider did not stream (or streaming disabled): emit whole reply.
+            self._emit_state("speaking")
+            if on_sentence is not None:
+                on_sentence(reply)
+            else:
+                self.output_adapter.emit(reply)
+
+        user_turn_id = self.memory_store.save_turn(self.session_id, "user", user_text)
         self.memory_store.save_turn(self.session_id, "assistant", reply)
         memory_task = self.brain.create_memory_task(
             session_id=self.session_id,
@@ -105,10 +149,15 @@ class Orchestrator:
             latency_ms=background_enqueue_ms,
             metadata={"profile": self.active_profile.name},
         )
+        if stream_state["first_token_ms"] is not None:
+            self._record_performance(
+                phase="llm.first_token",
+                latency_ms=stream_state["first_token_ms"],
+                metadata={"profile": self.active_profile.name},
+            )
         turn_total_ms = int((time.perf_counter() - turn_started) * 1000)
         self._record_core_timings(debug_info, turn_total_ms)
         self._record_system_snapshot(source="turn")
-        self._emit_state("speaking")
         if self.debug_enabled:
             self.output_adapter.emit(render_debug_info(debug_info))
         self._emit_state("idle")
@@ -161,6 +210,20 @@ class Orchestrator:
         if command == "/debug":
             self._toggle_debug(argument)
             return False
+        if command == "/stream":
+            self._toggle_streaming(argument)
+            return False
+        if command == "/episodes":
+            episodes = self.memory_store.search_episodes(argument, limit=5) if argument else []
+            if argument:
+                payload = [
+                    {"user": ep.user_text, "assistant": ep.assistant_text, "at": ep.created_at, "score": ep.score}
+                    for ep in episodes
+                ]
+                self.output_adapter.emit(json.dumps(payload, indent=2, ensure_ascii=True))
+            else:
+                self.output_adapter.emit("Usage: /episodes <query>")
+            return False
         if command == "/benchmark":
             self._run_benchmark()
             return False
@@ -199,10 +262,12 @@ class Orchestrator:
             "/models - List configured profiles and provider-visible models.",
             "/mode [fast|balanced|vision_test] - Show or switch the runtime mode.",
             "/use <profile-or-model> - Switch the active model/profile.",
-            "/reasoning on|off - Toggle provider reasoning if supported.",
-            "/think on|off - Alias for /reasoning on|off.",
+            "/reasoning on|off|auto - Toggle thinking mode (auto = on only for complex turns).",
+            "/think on|off|auto - Alias for /reasoning.",
+            "/stream on|off - Toggle token streaming output.",
             "/memory - Show recent stored conversation rows.",
             "/facts - Show extracted durable facts.",
+            "/episodes <query> - Search episodic memory.",
             "/summary - Show recent rolling summaries.",
             "/perf - Show recent performance logs and system snapshots.",
             "/system - Capture and print a fresh system snapshot.",
@@ -294,7 +359,24 @@ class Orchestrator:
                 f"Reasoning enabled for {self.active_profile.name} ({self.active_profile.model})."
             )
             return
-        self.output_adapter.emit("Usage: /reasoning on|off")
+        if value == "auto":
+            self.active_profile.options["think"] = "auto"
+            self.output_adapter.emit(
+                f"Reasoning set to auto for {self.active_profile.name}: on for complex turns, off for chat."
+            )
+            return
+        self.output_adapter.emit("Usage: /reasoning on|off|auto")
+
+    def _toggle_streaming(self, argument: str) -> None:
+        value = argument.lower()
+        if value in {"on", "true", "1"}:
+            self.config.stream_responses = True
+        elif value in {"off", "false", "0"}:
+            self.config.stream_responses = False
+        else:
+            self.output_adapter.emit(f"Streaming is {'on' if self.config.stream_responses else 'off'}. Usage: /stream on|off")
+            return
+        self.output_adapter.emit(f"Streaming {'enabled' if self.config.stream_responses else 'disabled'}.")
 
     def _run_benchmark(self) -> None:
         prompt_path = Path(self.config.benchmark_prompt_path)

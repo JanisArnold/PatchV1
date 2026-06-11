@@ -6,13 +6,17 @@
     "debug": false,
     "default_profile": "default",
     "runtime_mode": "fast",
+    "stream_responses": true,
     "display_enabled": false,
     "camera_enabled": false
   },
   "memory": {
     "recent_turn_limit": 6,
     "max_fact_hits": 5,
-    "summary_turn_window": 6
+    "summary_turn_window": 6,
+    "episodic_enabled": true,
+    "episodic_backend": "keyword",
+    "max_episodic_hits": 3
   },
   "providers": {
     "active": "llama_cpp",
@@ -36,6 +40,9 @@
     "input_device": "plughw:3,0",
     "output_device": "plughw:0,0",
     "record_seconds": 5,
+    "stt_engine": "whisper_cpp",
+    "whisper_cpp_binary": "whisper-cli",
+    "whisper_model_path": "stt-models/ggml-small.en-q8_0.bin",
     "vosk_model_path": "stt-models/vosk-model-small-en-us-0.15",
     "piper_voice_dir": "voices",
     "piper_voice_name": "en_US-lessac-medium"
@@ -43,30 +50,36 @@
   "model_profiles": {
     "default": {
       "provider": "llama_cpp",
-      "model": "gemma4-e2b-q4",
-      "model_path": "models/gemma4-e2b-q4.gguf",
+      "model": "gemma-4-e2b-it-qat-q4_0",
+      "model_path": "models/gemma-4-e2b-it-qat-q4_0.gguf",
       "temperature": 0.4,
       "top_p": 0.9,
       "num_ctx": 2048,
-      "system_prompt": "You are PATCH, a warm, practical desktop AI companion."
+      "max_tokens": 192,
+      "think": "auto",
+      "system_prompt": "You are PATCH, a warm, practical desktop AI companion. Keep spoken replies short: one to three sentences unless asked for more."
     },
-    "gemma4-e2b-q4": {
+    "gemma-4-e2b-qat": {
       "provider": "llama_cpp",
-      "model": "gemma4-e2b-q4",
-      "model_path": "models/gemma4-e2b-q4.gguf",
+      "model": "gemma-4-e2b-it-qat-q4_0",
+      "model_path": "models/gemma-4-e2b-it-qat-q4_0.gguf",
       "temperature": 0.4,
       "top_p": 0.9,
       "num_ctx": 2048,
-      "system_prompt": "You are PATCH, a warm, practical desktop AI companion."
+      "max_tokens": 192,
+      "think": "auto",
+      "system_prompt": "You are PATCH, a warm, practical desktop AI companion. Keep spoken replies short: one to three sentences unless asked for more."
     },
-    "qwen3.5-2b-q4": {
+    "gemma-4-e4b-qat": {
       "provider": "llama_cpp",
-      "model": "qwen3.5-2b-q4",
-      "model_path": "models/qwen3.5-2b-q4.gguf",
+      "model": "gemma-4-e4b-it-qat-q4_0",
+      "model_path": "models/gemma-4-e4b-it-qat-q4_0.gguf",
       "temperature": 0.4,
       "top_p": 0.9,
-      "num_ctx": 2048,
-      "system_prompt": "You are PATCH, a warm, practical desktop AI companion."
+      "num_ctx": 4096,
+      "max_tokens": 256,
+      "think": "auto",
+      "system_prompt": "You are PATCH, a warm, practical desktop AI companion. Keep spoken replies short: one to three sentences unless asked for more."
     },
     "qwen3.5-4b-q4": {
       "provider": "llama_cpp",
@@ -75,16 +88,8 @@
       "temperature": 0.35,
       "top_p": 0.9,
       "num_ctx": 3072,
+      "max_tokens": 256,
       "system_prompt": "You are PATCH, a warm, practical desktop AI companion."
-    },
-    "phi4-mini-q4": {
-      "provider": "llama_cpp",
-      "model": "phi4-mini-q4",
-      "model_path": "models/phi4-mini-q4.gguf",
-      "temperature": 0.3,
-      "top_p": 0.85,
-      "num_ctx": 3072,
-      "system_prompt": "You are PATCH, a careful desktop AI companion who answers thoughtfully."
     }
   }
 }

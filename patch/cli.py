@@ -5,6 +5,7 @@ from patch.background import MemoryMaintenanceWorker
 from patch.brain import Brain
 from patch.config import load_config
 from patch.memory import SQLiteMemoryStore
+from patch.memory.episodic import build_episodic_index
 from patch.personality import load_persona
 from patch.providers import LlamaCppChatProvider, OllamaChatProvider
 from patch.orchestrator import Orchestrator
@@ -25,11 +26,19 @@ def build_app() -> Orchestrator:
             timeout_seconds=config.ollama_timeout_seconds,
         )
     }
+    episodic_index = None
+    if config.episodic_enabled:
+        episodic_index = build_episodic_index(
+            backend=config.episodic_backend,
+            store=memory_store,
+            data_dir=config.data_dir,
+        )
     brain = Brain(
         config=config,
         memory_store=memory_store,
         provider_registry=providers,
         persona=persona,
+        episodic_index=episodic_index,
     )
     background_worker = MemoryMaintenanceWorker(
         config=config,

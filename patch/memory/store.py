@@ -1,11 +1,24 @@
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import asdict
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from patch.contracts import ChatMessage, MemoryBundle, MemoryFact
+from patch.contracts import ChatMessage, EpisodicMemory, MemoryBundle, MemoryFact
+
+
+_TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
+_STOPWORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "do", "for", "from",
+    "have", "how", "i", "in", "is", "it", "me", "my", "of", "on", "or", "so",
+    "that", "the", "this", "to", "was", "we", "what", "when", "with", "you", "your",
+}
+
+
+def tokenize(text: str) -> List[str]:
+    return [token for token in _TOKEN_PATTERN.findall(text.lower()) if token not in _STOPWORDS]
 
 
 SCHEMA = """
@@ -34,6 +47,17 @@ CREATE TABLE IF NOT EXISTS summaries (
     session_id INTEGER,
     summary_text TEXT NOT NULL,
     turn_count INTEGER NOT NULL,
+    last_turn_id INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (session_id) REFERENCES sessions(id)
+);
+
+CREATE TABLE IF NOT EXISTS episodes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER,
+    user_text TEXT NOT NULL,
+    assistant_text TEXT NOT NULL,
+    tokens TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (session_id) REFERENCES sessions(id)
 );
@@ -102,6 +126,10 @@ class SQLiteMemoryStore:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(self.database_path, timeout=30)
         self.connection.row_factory = sqlite3.Row
+        # WAL lets the hot path and the background memory worker write through
+        # separate connections without blocking each other.
+        self.connection.execute("PRAGMA journal_mode=WAL")
+        self.connection.execute("PRAGMA synchronous=NORMAL")
         self._ensure_schema()
 
     def close(self) -> None:
@@ -109,11 +137,22 @@ class SQLiteMemoryStore:
 
     def _ensure_schema(self) -> None:
         self.connection.executescript(SCHEMA)
+        self._migrate_schema()
         self.connection.execute(
-            "INSERT OR IGNORE INTO meta(key, value) VALUES (?, ?)",
-            ("schema_version", "1"),
+            "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+            ("schema_version", "2"),
         )
         self.connection.commit()
+
+    def _migrate_schema(self) -> None:
+        columns = {
+            row["name"]
+            for row in self.connection.execute("PRAGMA table_info(summaries)").fetchall()
+        }
+        if "last_turn_id" not in columns:
+            self.connection.execute(
+                "ALTER TABLE summaries ADD COLUMN last_turn_id INTEGER NOT NULL DEFAULT 0"
+            )
 
     def create_session(self) -> int:
         cursor = self.connection.execute("INSERT INTO sessions DEFAULT VALUES")
@@ -148,10 +187,10 @@ class SQLiteMemoryStore:
         ).fetchone()
         return None if row is None else str(row["summary_text"])
 
-    def save_summary(self, session_id: int, summary_text: str, turn_count: int) -> None:
+    def save_summary(self, session_id: int, summary_text: str, turn_count: int, last_turn_id: int = 0) -> None:
         self.connection.execute(
-            "INSERT INTO summaries(session_id, summary_text, turn_count) VALUES (?, ?, ?)",
-            (session_id, summary_text, turn_count),
+            "INSERT INTO summaries(session_id, summary_text, turn_count, last_turn_id) VALUES (?, ?, ?, ?)",
+            (session_id, summary_text, turn_count, last_turn_id),
         )
         self.connection.commit()
 
@@ -159,6 +198,20 @@ class SQLiteMemoryStore:
         row = self.connection.execute(
             "SELECT COUNT(*) AS count FROM turns WHERE session_id = ?",
             (session_id,),
+        ).fetchone()
+        return int(row["count"])
+
+    def get_max_turn_id(self) -> int:
+        row = self.connection.execute("SELECT COALESCE(MAX(id), 0) AS max_id FROM turns").fetchone()
+        return int(row["max_id"])
+
+    def count_turns_since_last_summary(self) -> int:
+        row = self.connection.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM turns
+            WHERE id > COALESCE((SELECT MAX(last_turn_id) FROM summaries), 0)
+            """
         ).fetchone()
         return int(row["count"])
 
@@ -178,36 +231,21 @@ class SQLiteMemoryStore:
         self.connection.commit()
 
     def get_relevant_facts(self, query: str, limit: int) -> List[MemoryFact]:
-        like = f"%{query.lower()}%"
         rows = self.connection.execute(
             """
             SELECT subject, predicate, value, confidence
             FROM facts
-            WHERE LOWER(subject || ' ' || predicate || ' ' || value) LIKE ?
             ORDER BY updated_at DESC, confidence DESC
-            LIMIT ?
-            """,
-            (like, limit),
-        ).fetchall()
-        if rows:
-            return [
-                MemoryFact(
-                    subject=row["subject"],
-                    predicate=row["predicate"],
-                    value=row["value"],
-                    confidence=float(row["confidence"]),
-                )
-                for row in rows
-            ]
-        fallback = self.connection.execute(
+            LIMIT 500
             """
-            SELECT subject, predicate, value, confidence
-            FROM facts
-            ORDER BY updated_at DESC, confidence DESC
-            LIMIT ?
-            """,
-            (limit,),
         ).fetchall()
+        query_tokens = set(tokenize(query))
+        scored: List[tuple] = []
+        for order, row in enumerate(rows):
+            fact_tokens = set(tokenize(f"{row['subject']} {row['predicate']} {row['value']}"))
+            overlap = len(query_tokens & fact_tokens)
+            scored.append((overlap, -order, row))
+        scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
         return [
             MemoryFact(
                 subject=row["subject"],
@@ -215,7 +253,7 @@ class SQLiteMemoryStore:
                 value=row["value"],
                 confidence=float(row["confidence"]),
             )
-            for row in fallback
+            for _, _, row in scored[:limit]
         ]
 
     def build_memory_bundle(
@@ -225,11 +263,18 @@ class SQLiteMemoryStore:
         max_fact_hits: int,
         include_summary: bool = True,
         include_facts: bool = True,
+        include_episodes: bool = False,
+        max_episodic_hits: int = 3,
+        episodic_index=None,
     ) -> MemoryBundle:
+        episodes: List[EpisodicMemory] = []
+        if include_episodes and episodic_index is not None:
+            episodes = episodic_index.search(query, max_episodic_hits)
         return MemoryBundle(
             recent_turns=self.get_recent_turns(recent_turn_limit),
             latest_summary=self.get_latest_summary() if include_summary else None,
             facts=self.get_relevant_facts(query=query, limit=max_fact_hits) if include_facts else [],
+            episodes=episodes,
         )
 
     def get_facts(self, limit: int = 20) -> List[Dict[str, object]]:
@@ -363,26 +408,55 @@ class SQLiteMemoryStore:
         ).fetchall()
         return [dict(row) for row in rows]
 
-    def count_turns_since_last_summary(self, session_id: int) -> int:
-        row = self.connection.execute(
-            """
-            SELECT COUNT(*) AS count
-            FROM turns
-            WHERE session_id = ?
-              AND id > COALESCE(
-                  (SELECT MAX(id) FROM turns WHERE id <= (
-                      SELECT COALESCE(MAX(turn_count), 0) FROM summaries WHERE session_id = ?
-                  )),
-                  0
-              )
-            """,
-            (session_id, session_id),
+    def add_episode(self, *, session_id: int, user_text: str, assistant_text: str) -> int:
+        tokens = " ".join(sorted(set(tokenize(f"{user_text} {assistant_text}"))))
+        cursor = self.connection.execute(
+            "INSERT INTO episodes(session_id, user_text, assistant_text, tokens) VALUES (?, ?, ?, ?)",
+            (session_id, user_text, assistant_text, tokens),
+        )
+        self.connection.commit()
+        return int(cursor.lastrowid)
+
+    def search_episodes(self, query: str, limit: int, exclude_latest: int = 3) -> List[EpisodicMemory]:
+        query_tokens = set(tokenize(query))
+        if not query_tokens:
+            return []
+        max_id_row = self.connection.execute(
+            "SELECT COALESCE(MAX(id), 0) AS max_id FROM episodes"
         ).fetchone()
-        return int(row["count"])
+        cutoff_id = int(max_id_row["max_id"]) - exclude_latest
+        rows = self.connection.execute(
+            """
+            SELECT user_text, assistant_text, tokens, created_at
+            FROM episodes
+            WHERE id <= ?
+            ORDER BY id DESC
+            LIMIT 2000
+            """,
+            (cutoff_id,),
+        ).fetchall()
+        scored: List[EpisodicMemory] = []
+        for row in rows:
+            episode_tokens = set(row["tokens"].split())
+            overlap = len(query_tokens & episode_tokens)
+            if overlap == 0:
+                continue
+            score = overlap / float(len(query_tokens))
+            scored.append(
+                EpisodicMemory(
+                    user_text=row["user_text"],
+                    assistant_text=row["assistant_text"],
+                    created_at=row["created_at"],
+                    score=score,
+                )
+            )
+        scored.sort(key=lambda episode: episode.score, reverse=True)
+        return scored[:limit]
 
     def export_bundle_dict(self, bundle: MemoryBundle) -> Dict[str, object]:
         return {
             "recent_turns": [asdict(turn) for turn in bundle.recent_turns],
             "latest_summary": bundle.latest_summary,
             "facts": [asdict(fact) for fact in bundle.facts],
+            "episodes": [asdict(episode) for episode in bundle.episodes],
         }

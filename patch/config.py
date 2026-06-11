@@ -22,6 +22,9 @@ class AppConfig:
     recent_turn_limit: int
     max_fact_hits: int
     summary_turn_window: int
+    max_episodic_hits: int
+    episodic_enabled: bool
+    episodic_backend: str
     active_provider: str
     llama_cpp_base_url: str
     llama_cpp_timeout_seconds: int
@@ -31,10 +34,14 @@ class AppConfig:
     audio_input_device: str
     audio_output_device: str
     voice_record_seconds: int
+    stt_engine: str
     vosk_model_path: str
+    whisper_cpp_binary: str
+    whisper_model_path: str
     piper_voice_dir: str
     piper_voice_name: str
     model_profiles: Dict[str, ModelProfile]
+    stream_responses: bool = True
 
     @property
     def database_path(self) -> Path:
@@ -59,7 +66,7 @@ def load_config() -> AppConfig:
             key: val
             for key, val in value.items()
             if key
-            not in {"provider", "model", "temperature", "top_p", "num_ctx", "system_prompt"}
+            not in {"provider", "model", "model_path", "temperature", "top_p", "num_ctx", "system_prompt"}
         }
         model_profiles[name] = ModelProfile(
             name=name,
@@ -82,9 +89,13 @@ def load_config() -> AppConfig:
         runtime_mode=str(raw["app"].get("runtime_mode", "balanced")),
         display_enabled=bool(raw["app"].get("display_enabled", False)),
         camera_enabled=bool(raw["app"].get("camera_enabled", False)),
+        stream_responses=bool(raw["app"].get("stream_responses", True)),
         recent_turn_limit=int(raw["memory"]["recent_turn_limit"]),
         max_fact_hits=int(raw["memory"]["max_fact_hits"]),
         summary_turn_window=int(raw["memory"]["summary_turn_window"]),
+        max_episodic_hits=int(raw["memory"].get("max_episodic_hits", 3)),
+        episodic_enabled=bool(raw["memory"].get("episodic_enabled", True)),
+        episodic_backend=str(raw["memory"].get("episodic_backend", "keyword")),
         active_provider=raw["providers"]["active"],
         llama_cpp_base_url=raw["providers"].get("llama_cpp", {}).get("base_url", "http://127.0.0.1:8080"),
         llama_cpp_timeout_seconds=int(
@@ -98,7 +109,12 @@ def load_config() -> AppConfig:
         audio_input_device=str(raw.get("audio", {}).get("input_device", "default")),
         audio_output_device=str(raw.get("audio", {}).get("output_device", "default")),
         voice_record_seconds=int(raw.get("audio", {}).get("record_seconds", 5)),
+        stt_engine=str(raw.get("audio", {}).get("stt_engine", "whisper_cpp")),
         vosk_model_path=str(raw.get("audio", {}).get("vosk_model_path", "stt-models/vosk-model-small-en-us-0.15")),
+        whisper_cpp_binary=str(raw.get("audio", {}).get("whisper_cpp_binary", "whisper-cli")),
+        whisper_model_path=str(
+            raw.get("audio", {}).get("whisper_model_path", "stt-models/ggml-small.en-q8_0.bin")
+        ),
         piper_voice_dir=str(raw.get("audio", {}).get("piper_voice_dir", "voices")),
         piper_voice_name=str(raw.get("audio", {}).get("piper_voice_name", "en_US-lessac-medium")),
         model_profiles=model_profiles,

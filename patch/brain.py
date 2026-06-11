@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import re
 import time
-from typing import Dict, List, Optional
+from dataclasses import replace
+from typing import Callable, Dict, List, Optional
 
 from patch.config import AppConfig
 from patch.contracts import ChatMessage, MemoryFact, MemoryTask, ModelProfile, ProviderResponse, TurnPlan
@@ -86,11 +87,13 @@ class Brain:
         memory_store: SQLiteMemoryStore,
         provider_registry: Dict[str, object],
         persona: str,
+        episodic_index=None,
     ) -> None:
         self.config = config
         self.memory_store = memory_store
         self.provider_registry = provider_registry
         self.persona = persona
+        self.episodic_index = episodic_index
         self.fact_extractor = RuleBasedFactExtractor()
         self.summary_service = SummaryService()
 
@@ -110,24 +113,51 @@ class Brain:
     def build_turn_plan(self, user_text: str, runtime_mode: str) -> tuple[TurnPlan, int]:
         started = time.perf_counter()
         turn_type = self.classify_turn(user_text)
+        # Spec rule: thinking mode burns tokens, so it stays off for casual
+        # chat and only turns on for genuinely complex turns.
+        think = True if turn_type == "complex" else False
         if runtime_mode == "fast":
             if turn_type == "smalltalk":
-                plan = TurnPlan(turn_type=turn_type, recent_turn_limit=3, include_summary=False, include_facts=False)
-            elif turn_type == "memory_related":
-                plan = TurnPlan(turn_type=turn_type, recent_turn_limit=4, include_summary=True, include_facts=True)
+                plan = TurnPlan(
+                    turn_type=turn_type, recent_turn_limit=3,
+                    include_summary=False, include_facts=False,
+                    include_episodes=False, think=think,
+                )
             else:
-                plan = TurnPlan(turn_type=turn_type, recent_turn_limit=4, include_summary=True, include_facts=True)
+                plan = TurnPlan(
+                    turn_type=turn_type, recent_turn_limit=4,
+                    include_summary=True, include_facts=True,
+                    include_episodes=True, think=think,
+                )
         elif runtime_mode == "vision_test":
-            plan = TurnPlan(turn_type=turn_type, recent_turn_limit=5, include_summary=True, include_facts=True)
+            plan = TurnPlan(
+                turn_type=turn_type, recent_turn_limit=5,
+                include_summary=True, include_facts=True,
+                include_episodes=True, think=think,
+            )
         else:
             if turn_type == "smalltalk":
-                plan = TurnPlan(turn_type=turn_type, recent_turn_limit=4, include_summary=False, include_facts=False)
+                plan = TurnPlan(
+                    turn_type=turn_type, recent_turn_limit=4,
+                    include_summary=False, include_facts=False,
+                    include_episodes=False, think=think,
+                )
             else:
-                plan = TurnPlan(turn_type=turn_type, recent_turn_limit=6, include_summary=True, include_facts=True)
+                plan = TurnPlan(
+                    turn_type=turn_type, recent_turn_limit=6,
+                    include_summary=True, include_facts=True,
+                    include_episodes=True, think=think,
+                )
         classification_ms = int((time.perf_counter() - started) * 1000)
         return plan, classification_ms
 
-    def generate_reply(self, user_text: str, profile: ModelProfile, runtime_mode: str) -> tuple:
+    def generate_reply(
+        self,
+        user_text: str,
+        profile: ModelProfile,
+        runtime_mode: str,
+        on_token: Optional[Callable[[str], None]] = None,
+    ) -> tuple:
         started_total = time.perf_counter()
         turn_plan, classification_ms = self.build_turn_plan(user_text, runtime_mode)
         retrieval_started = time.perf_counter()
@@ -137,14 +167,21 @@ class Brain:
             max_fact_hits=self.config.max_fact_hits,
             include_summary=turn_plan.include_summary,
             include_facts=turn_plan.include_facts,
+            include_episodes=turn_plan.include_episodes and self.config.episodic_enabled,
+            max_episodic_hits=self.config.max_episodic_hits,
+            episodic_index=self.episodic_index,
         )
         retrieval_ms = int((time.perf_counter() - retrieval_started) * 1000)
         prompt_started = time.perf_counter()
         messages = self._build_messages(user_text, profile, bundle)
         prompt_build_ms = int((time.perf_counter() - prompt_started) * 1000)
         provider = self.provider_registry[profile.provider]
+        effective_profile = self._apply_turn_thinking(profile, turn_plan, provider)
         started = time.perf_counter()
-        response: ProviderResponse = provider.generate_reply(messages, profile)
+        if on_token is not None and hasattr(provider, "generate_stream"):
+            response: ProviderResponse = provider.generate_stream(messages, effective_profile, on_token)
+        else:
+            response = provider.generate_reply(messages, effective_profile)
         latency_ms = int((time.perf_counter() - started) * 1000)
         total_ms = int((time.perf_counter() - started_total) * 1000)
         debug_info: Dict[str, object] = {
@@ -164,9 +201,21 @@ class Brain:
                 "recent_turn_limit": turn_plan.recent_turn_limit,
                 "include_summary": turn_plan.include_summary,
                 "include_facts": turn_plan.include_facts,
+                "include_episodes": turn_plan.include_episodes,
+                "think": turn_plan.think,
             },
         }
         return response.text, debug_info
+
+    def _apply_turn_thinking(self, profile: ModelProfile, turn_plan: TurnPlan, provider) -> ModelProfile:
+        """Resolve a per-turn thinking override when the profile uses think="auto"."""
+        if profile.options.get("think") != "auto" or turn_plan.think is None:
+            return profile
+        if not provider.supports_reasoning_toggle(profile):
+            return profile
+        options = dict(profile.options)
+        options["think"] = turn_plan.think
+        return replace(profile, options=options)
 
     def create_memory_task(
         self,
@@ -200,10 +249,26 @@ class Brain:
             metadata_json=json.dumps({"profile": active_profile.name}),
         )
 
-        total_turns = self.memory_store.get_turn_count(task.session_id)
-        if total_turns % self.config.summary_turn_window != 0:
+        if self.episodic_index is not None:
+            episodic_started = time.perf_counter()
+            self.episodic_index.add(
+                user_text=task.user_text,
+                assistant_text=task.assistant_text,
+                session_id=task.session_id,
+            )
+            episodic_ms = int((time.perf_counter() - episodic_started) * 1000)
+            self.memory_store.record_performance_log(
+                session_id=task.session_id,
+                phase="background.memory.episodic_index",
+                latency_ms=episodic_ms,
+                metadata_json=json.dumps({"backend": self.config.episodic_backend}),
+            )
+
+        turns_since_summary = self.memory_store.count_turns_since_last_summary()
+        if turns_since_summary < self.config.summary_turn_window:
             return
 
+        total_turns = self.memory_store.get_turn_count(task.session_id)
         summary_started = time.perf_counter()
         turns = self.memory_store.get_recent_turns(limit=self.config.summary_turn_window)
         previous_summary = self.memory_store.get_latest_summary()
@@ -219,6 +284,7 @@ class Brain:
             session_id=task.session_id,
             summary_text=summary_text,
             turn_count=total_turns,
+            last_turn_id=self.memory_store.get_max_turn_id(),
         )
         summary_ms = int((time.perf_counter() - summary_started) * 1000)
         self.memory_store.record_performance_log(
@@ -241,6 +307,12 @@ class Brain:
         if bundle.facts:
             fact_lines = [f"- {fact.subject} {fact.predicate}: {fact.value}" for fact in bundle.facts]
             system_parts.append("Relevant remembered facts:\n" + "\n".join(fact_lines))
+        if bundle.episodes:
+            episode_lines = [
+                f"- [{episode.created_at}] user said: {episode.user_text} / you replied: {episode.assistant_text}"
+                for episode in bundle.episodes
+            ]
+            system_parts.append("Relevant past exchanges:\n" + "\n".join(episode_lines))
         messages = [ChatMessage(role="system", content="\n\n".join(part for part in system_parts if part))]
         messages.extend(bundle.recent_turns)
         messages.append(ChatMessage(role="user", content=user_text))

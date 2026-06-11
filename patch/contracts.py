@@ -32,10 +32,19 @@ class MemoryFact:
 
 
 @dataclass
+class EpisodicMemory:
+    user_text: str
+    assistant_text: str
+    created_at: str
+    score: float = 0.0
+
+
+@dataclass
 class MemoryBundle:
     recent_turns: List[ChatMessage]
     latest_summary: Optional[str]
     facts: List[MemoryFact]
+    episodes: List[EpisodicMemory] = field(default_factory=list)
 
 
 @dataclass
@@ -52,6 +61,9 @@ class TurnPlan:
     recent_turn_limit: int
     include_summary: bool
     include_facts: bool
+    include_episodes: bool = False
+    # None = leave the profile setting alone; True/False = per-turn override.
+    think: Optional[bool] = None
 
 
 @dataclass
@@ -65,6 +77,14 @@ class MemoryTask:
 
 class ChatProvider(Protocol):
     def generate_reply(self, messages: List[ChatMessage], model_profile: ModelProfile) -> ProviderResponse:
+        ...
+
+    def generate_stream(
+        self,
+        messages: List[ChatMessage],
+        model_profile: ModelProfile,
+        on_token,
+    ) -> ProviderResponse:
         ...
 
     def healthcheck(self) -> tuple:
@@ -112,4 +132,12 @@ class DisplayAdapter(Protocol):
 
 class VisionAdapter(Protocol):
     def capture_scene_description(self, prompt: Optional[str] = None) -> Optional[str]:
+        ...
+
+
+class EpisodicIndex(Protocol):
+    def add(self, *, user_text: str, assistant_text: str, session_id: int) -> None:
+        ...
+
+    def search(self, query: str, limit: int) -> List[EpisodicMemory]:
         ...

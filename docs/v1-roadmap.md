@@ -10,11 +10,12 @@ For the full staged plan from PC testing to Pi deployment, voice, camera, displa
 
 The main V1 additions beyond V0 are:
 
-- speech-to-text input
-- text-to-speech output
-- camera integration
-- eye/display UI
+- speech-to-text input (whisper.cpp `small.en`, silero-VAD later)
+- text-to-speech output (Piper, fed sentence-by-sentence from the token stream)
+- LanceDB-backed episodic memory on the Pi
+- camera integration (Gemma 4 is natively multimodal — frames go straight in, no second model)
+- eye/display UI driven by orchestrator states
 - Pi deployment validation
-- optional `systemd` startup
+- optional `systemd` startup for `llama-server` and PATCH
 
 The terminal-mode brain core should stay reusable, with one efficient local default model and cloud fallback reserved for heavier tasks later.

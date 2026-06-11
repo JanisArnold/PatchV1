@@ -2,24 +2,30 @@ from __future__ import annotations
 
 import queue
 import threading
+import traceback
 from typing import Optional
 
 from patch.brain import Brain
 from patch.config import AppConfig
 from patch.contracts import MemoryTask
 from patch.memory import SQLiteMemoryStore
+from patch.memory.episodic import build_episodic_index
 
 
 class MemoryMaintenanceWorker:
+    """Runs fact extraction, episodic indexing, and summaries off the hot path.
+
+    The worker owns its own SQLite connection and episodic index, both created
+    inside the worker thread: sqlite3 connections are bound to the thread that
+    creates them, and embedding models (LanceDB backend) should load off the
+    main thread anyway.
+    """
+
     def __init__(self, *, config: AppConfig, provider_registry: dict[str, object], persona: str) -> None:
         self._queue: queue.Queue[Optional[MemoryTask]] = queue.Queue()
-        self._store = SQLiteMemoryStore(config.database_path)
-        self._brain = Brain(
-            config=config,
-            memory_store=self._store,
-            provider_registry=provider_registry,
-            persona=persona,
-        )
+        self._config = config
+        self._provider_registry = provider_registry
+        self._persona = persona
         self._thread = threading.Thread(target=self._run, name="patch-memory-worker", daemon=True)
         self._thread.start()
 
@@ -28,14 +34,40 @@ class MemoryMaintenanceWorker:
 
     def close(self) -> None:
         self._queue.put(None)
-        self._thread.join(timeout=5)
-        self._store.close()
+        self._thread.join(timeout=10)
 
     def _run(self) -> None:
-        while True:
-            task = self._queue.get()
-            if task is None:
-                self._queue.task_done()
-                return
-            self._brain.process_memory_task(task)
-            self._queue.task_done()
+        store = SQLiteMemoryStore(self._config.database_path)
+        episodic_index = None
+        if self._config.episodic_enabled:
+            try:
+                episodic_index = build_episodic_index(
+                    backend=self._config.episodic_backend,
+                    store=store,
+                    data_dir=self._config.data_dir,
+                )
+            except RuntimeError as exc:
+                print(f"[memory-worker] episodic backend unavailable: {exc}")
+        brain = Brain(
+            config=self._config,
+            memory_store=store,
+            provider_registry=self._provider_registry,
+            persona=self._persona,
+            episodic_index=episodic_index,
+        )
+        try:
+            while True:
+                task = self._queue.get()
+                if task is None:
+                    self._queue.task_done()
+                    return
+                try:
+                    brain.process_memory_task(task)
+                except Exception:
+                    # A failed memory task must never kill the worker thread;
+                    # the user already has their reply.
+                    traceback.print_exc()
+                finally:
+                    self._queue.task_done()
+        finally:
+            store.close()

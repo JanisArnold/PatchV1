@@ -5,6 +5,7 @@ from tempfile import TemporaryDirectory
 from patch.brain import Brain, RuleBasedFactExtractor
 from patch.config import AppConfig
 from patch.contracts import MemoryFact, ModelProfile, ProviderResponse
+from patch.memory.episodic import KeywordEpisodicIndex
 from patch.memory.store import SQLiteMemoryStore
 
 
@@ -50,6 +51,9 @@ def build_config(tmp_path: Path) -> AppConfig:
         recent_turn_limit=6,
         max_fact_hits=5,
         summary_turn_window=2,
+        max_episodic_hits=3,
+        episodic_enabled=True,
+        episodic_backend="keyword",
         active_provider="llama_cpp",
         llama_cpp_base_url="http://127.0.0.1:8080",
         llama_cpp_timeout_seconds=30,
@@ -59,10 +63,14 @@ def build_config(tmp_path: Path) -> AppConfig:
         audio_input_device="default",
         audio_output_device="default",
         voice_record_seconds=5,
+        stt_engine="whisper_cpp",
         vosk_model_path="stt-models/test-model",
+        whisper_cpp_binary="whisper-cli",
+        whisper_model_path="stt-models/test-whisper.bin",
         piper_voice_dir="voices",
         piper_voice_name="test-voice",
         model_profiles={"default": profile},
+        stream_responses=False,
     )
 
 
@@ -162,6 +170,78 @@ class BrainTests(unittest.TestCase):
             phases = {row["phase"] for row in rows}
             self.assertIn("background.memory.fact_extraction", phases)
             self.assertIn("background.memory.summary", phases)
+            store.close()
+
+    def test_episodic_memory_indexed_and_retrieved(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            config = build_config(tmp_path)
+            store = SQLiteMemoryStore(tmp_path / "patch.db")
+            index = KeywordEpisodicIndex(store)
+            brain = Brain(
+                config=config,
+                memory_store=store,
+                provider_registry={"llama_cpp": FakeProvider()},
+                persona="You are PATCH.",
+                episodic_index=index,
+            )
+            session_id = store.create_session()
+            # Old exchange that should be retrievable later.
+            index.add(
+                user_text="I planted tomatoes in the garden last spring",
+                assistant_text="Tomatoes love sun, nice choice.",
+                session_id=session_id,
+            )
+            # Padding so the tomato episode is outside the excluded latest window.
+            for i in range(4):
+                index.add(user_text=f"filler chat {i}", assistant_text="ok", session_id=session_id)
+
+            episodes = index.search("how are my tomatoes doing in the garden", limit=3)
+            self.assertTrue(episodes)
+            self.assertIn("tomatoes", episodes[0].user_text)
+
+            _, debug_info = brain.generate_reply(
+                "do you remember my garden tomatoes?",
+                config.model_profiles["default"],
+                "fast",
+            )
+            self.assertTrue(debug_info["turn_plan"]["include_episodes"])
+            self.assertTrue(debug_info["memory_bundle"]["episodes"])
+            store.close()
+
+    def test_auto_thinking_resolves_per_turn(self) -> None:
+        with TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            config = build_config(tmp_path)
+            profile = config.model_profiles["default"]
+            profile.options["think"] = "auto"
+
+            captured = {}
+
+            class CapturingProvider(FakeProvider):
+                def supports_reasoning_toggle(self, model_profile):
+                    return True
+
+                def generate_reply(self, messages, model_profile):
+                    captured["think"] = model_profile.options.get("think")
+                    return super().generate_reply(messages, model_profile)
+
+            store = SQLiteMemoryStore(tmp_path / "patch.db")
+            brain = Brain(
+                config=config,
+                memory_store=store,
+                provider_registry={"llama_cpp": CapturingProvider()},
+                persona="You are PATCH.",
+            )
+
+            brain.generate_reply("hi there", profile, "fast")
+            self.assertFalse(captured["think"])
+
+            brain.generate_reply("compare these two architecture designs and analyze why", profile, "fast")
+            self.assertTrue(captured["think"])
+
+            # The stored profile itself must keep its "auto" marker.
+            self.assertEqual(profile.options["think"], "auto")
             store.close()
 
     def test_fast_mode_omits_summary_and_facts_for_smalltalk(self) -> None:
